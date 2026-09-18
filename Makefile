@@ -3,7 +3,7 @@
 install: bins
 
 # Rebuild binaries (used by Dockerfile).
-bins: temporal-server temporal-cassandra-tool temporal-sql-tool temporal-elasticsearch-tool tdbg
+bins: temporal-server temporal-cassandra-tool temporal-mongodb-tool temporal-sql-tool temporal-elasticsearch-tool tdbg
 
 # Install all tools, recompile proto files, run all possible checks and tests (long but comprehensive).
 all: clean proto bins check test
@@ -345,6 +345,7 @@ clean-bins:
 	@rm -f temporal-server
 	@rm -f temporal-server-debug
 	@rm -f temporal-cassandra-tool
+	@rm -f temporal-mongodb-tool
 	@rm -f tdbg
 	@rm -f fairsim
 	@rm -f temporal-sql-tool
@@ -365,6 +366,10 @@ fairsim: $(ALL_SRC)
 temporal-cassandra-tool: $(ALL_SRC)
 	@printf $(COLOR) "Build temporal-cassandra-tool with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
 	CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_TAG_FLAG) -o temporal-cassandra-tool ./cmd/tools/cassandra
+
+temporal-mongodb-tool: $(ALL_SRC)
+	@printf $(COLOR) "Build temporal-mongodb-tool with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
+	CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_TAG_FLAG) -o temporal-mongodb-tool ./cmd/tools/mongodb
 
 temporal-sql-tool: $(ALL_SRC)
 	@printf $(COLOR) "Build temporal-sql-tool with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
@@ -591,6 +596,10 @@ install-schema-postgresql12: temporal-sql-tool
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl postgres12 --db $(VISIBILITY_DB) setup-schema -v 0.0
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl postgres12 --db $(VISIBILITY_DB) update-schema -d ./schema/postgresql/v12/visibility/versioned
 
+install-schema-mongodb: temporal-mongodb-tool
+	./temporal-mongodb-tool -u temporal --pw temporal --db $(TEMPORAL_DB) setup-schema -v 0.0
+	./temporal-mongodb-tool -u temporal --pw temporal --db $(TEMPORAL_DB) update-schema
+
 install-schema-es: temporal-elasticsearch-tool
 	@printf $(COLOR) "Install Elasticsearch schema..."
 	./temporal-elasticsearch-tool -ep http://127.0.0.1:9200 setup-schema
@@ -634,11 +643,25 @@ install-schema-xdc: temporal-cassandra-tool temporal-elasticsearch-tool
 ##### Run server #####
 DOCKER_COMPOSE_FILES     := -f ./develop/docker-compose/docker-compose.yml -f ./develop/docker-compose/docker-compose.$(GOOS).yml
 DOCKER_COMPOSE_CDC_FILES := -f ./develop/docker-compose/docker-compose.cdc.yml -f ./develop/docker-compose/docker-compose.cdc.$(GOOS).yml
+MONGODB_QUALIFICATION_COMPOSE_FILE := -f ./develop/docker-compose/docker-compose.mongodb-qualification.yml
+MONGODB_SHARDED_QUALIFICATION_COMPOSE_FILE := -f ./develop/docker-compose/docker-compose.mongodb-sharded-qualification.yml
 start-dependencies:
 	docker compose $(DOCKER_COMPOSE_FILES) up
 
 stop-dependencies:
 	docker compose $(DOCKER_COMPOSE_FILES) down
+
+start-mongodb-qualification:
+	docker compose $(MONGODB_QUALIFICATION_COMPOSE_FILE) up -d --wait
+
+stop-mongodb-qualification:
+	docker compose $(MONGODB_QUALIFICATION_COMPOSE_FILE) down
+
+start-mongodb-sharded-qualification:
+	docker compose $(MONGODB_SHARDED_QUALIFICATION_COMPOSE_FILE) up -d --wait
+
+stop-mongodb-sharded-qualification:
+	docker compose $(MONGODB_SHARDED_QUALIFICATION_COMPOSE_FILE) down
 
 start-dependencies-dual:
 	docker compose $(DOCKER_COMPOSE_FILES) -f ./develop/docker-compose/docker-compose.secondary-es.yml up
@@ -687,6 +710,9 @@ start-sqlite: temporal-server
 
 start-sqlite-file: temporal-server
 	./temporal-server --config-file config/development-sqlite-file.yaml --allow-no-auth start
+
+start-mongodb: temporal-server
+	./temporal-server --config-file config/development-mongodb.yaml --allow-no-auth start
 
 start-xdc-cluster-a: temporal-server
 	./temporal-server --config-file config/development-cluster-a.yaml --allow-no-auth start

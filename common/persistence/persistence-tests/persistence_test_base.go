@@ -51,6 +51,7 @@ type (
 	// TestBaseOptions options to configure workflow test base.
 	TestBaseOptions struct {
 		SQLDBPluginName   string
+		NoSQLDBPluginName string
 		DBName            string
 		DBUsername        string
 		DBPassword        string
@@ -61,6 +62,7 @@ type (
 		SchemaDir         string `yaml:"-"`
 		FaultInjection    *config.FaultInjection
 		Logger            log.Logger `yaml:"-"`
+		MongoDBConfig     *config.MongoDB
 	}
 )
 
@@ -68,6 +70,7 @@ type (
 func (o *TestBaseOptions) ApplyDefaults(src *TestBaseOptions) {
 	o.StoreType = cmp.Or(o.StoreType, src.StoreType)
 	o.SQLDBPluginName = cmp.Or(o.SQLDBPluginName, src.SQLDBPluginName)
+	o.NoSQLDBPluginName = cmp.Or(o.NoSQLDBPluginName, src.NoSQLDBPluginName)
 	o.DBName = cmp.Or(o.DBName, src.DBName)
 	o.DBUsername = cmp.Or(o.DBUsername, src.DBUsername)
 	o.DBPassword = cmp.Or(o.DBPassword, src.DBPassword)
@@ -76,6 +79,10 @@ func (o *TestBaseOptions) ApplyDefaults(src *TestBaseOptions) {
 	o.SchemaDir = cmp.Or(o.SchemaDir, src.SchemaDir)
 	if o.ConnectAttributes == nil {
 		o.ConnectAttributes = src.ConnectAttributes
+	}
+	if o.MongoDBConfig == nil && src.MongoDBConfig != nil {
+		cfgCopy := *src.MongoDBConfig
+		o.MongoDBConfig = &cfgCopy
 	}
 }
 
@@ -176,7 +183,15 @@ func NewTestBase(options *TestBaseOptions) *TestBase {
 	case config.StoreTypeSQL:
 		return NewTestBaseWithSQL(options)
 	case config.StoreTypeNoSQL:
-		return NewTestBaseWithCassandra(options)
+		switch options.NoSQLDBPluginName {
+		case "mongodb":
+			return NewTestBaseWithMongoDB(options)
+		default:
+			if options.NoSQLDBPluginName == "" {
+				options.NoSQLDBPluginName = "cassandra"
+			}
+			return NewTestBaseWithCassandra(options)
+		}
 	default:
 		panic("invalid storeType " + options.StoreType)
 	}

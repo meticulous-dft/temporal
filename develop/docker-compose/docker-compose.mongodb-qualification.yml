@@ -1,0 +1,44 @@
+name: temporal-mongodb-qualification
+
+services:
+  mongodb-qualification:
+    image: mongo:8.0
+    container_name: temporal-mongodb-qualification
+    entrypoint:
+      - "/bin/bash"
+      - "/mongodb-qualification-entrypoint.sh"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: temporal
+      MONGO_INITDB_ROOT_PASSWORD: temporal
+      MONGO_REPLICA_SET: rs0
+      MONGO_REPLICA_SET_KEY: temporalmongodbqualificationkeymaterialmustbesharedbyallmembers1234567890
+    ports:
+      - "27017:27017"
+      - "27018:27018"
+      - "27019:27019"
+    volumes:
+      - ./mongodb-qualification-entrypoint.sh:/mongodb-qualification-entrypoint.sh:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'mongosh --quiet "mongodb://$$MONGO_INITDB_ROOT_USERNAME:$$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/admin?replicaSet=$$MONGO_REPLICA_SET" --eval ''const status = rs.status(); if (status.members.length !== 3 || status.members.filter((member) => member.stateStr === "PRIMARY").length !== 1) { quit(2); }''',
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  elasticsearch-qualification:
+    image: elasticsearch:7.10.1
+    container_name: temporal-elasticsearch-qualification
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

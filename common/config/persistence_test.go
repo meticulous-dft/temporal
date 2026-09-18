@@ -21,6 +21,65 @@ func TestSQLValidate_MutualExclusivity(t *testing.T) {
 	require.ErrorContains(t, err, "mutually exclusive")
 }
 
+func TestDataStoreValidate_MongoDB(t *testing.T) {
+	validMongoDB := func() *MongoDB {
+		return &MongoDB{
+			Hosts:          []string{"localhost:27017"},
+			DatabaseName:   "temporal",
+			ReadPreference: "primary",
+			WriteConcern:   "majority",
+		}
+	}
+
+	t.Run("MongoDB only", func(t *testing.T) {
+		err := (&DataStore{MongoDB: validMongoDB()}).Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("MongoDB and SQL", func(t *testing.T) {
+		err := (&DataStore{MongoDB: validMongoDB(), SQL: &SQL{}}).Validate()
+		require.ErrorContains(t, err, "one and only one datastore")
+	})
+
+	tests := []struct {
+		name       string
+		mutate     func(*MongoDB)
+		wantErrMsg string
+	}{
+		{name: "missing endpoint", mutate: func(cfg *MongoDB) { cfg.Hosts = nil }, wantErrMsg: "exactly one of uri or hosts"},
+		{name: "uri and hosts", mutate: func(cfg *MongoDB) { cfg.URI = "mongodb+srv://cluster.example.com" }, wantErrMsg: "exactly one of uri or hosts"},
+		{name: "empty host", mutate: func(cfg *MongoDB) { cfg.Hosts = []string{" "} }, wantErrMsg: "hosts must not contain empty"},
+		{name: "missing database", mutate: func(cfg *MongoDB) { cfg.DatabaseName = "" }, wantErrMsg: "databaseName must not be empty"},
+		{name: "user without password", mutate: func(cfg *MongoDB) { cfg.User = "temporal" }, wantErrMsg: "configured together"},
+		{name: "password without user", mutate: func(cfg *MongoDB) { cfg.Password = "secret" }, wantErrMsg: "configured together"},
+		{name: "minimum exceeds maximum", mutate: func(cfg *MongoDB) { cfg.MinConns, cfg.MaxConns = 2, 1 }, wantErrMsg: "minConns must not exceed maxConns"},
+		{name: "max connecting exceeds maximum", mutate: func(cfg *MongoDB) { cfg.MaxConnecting, cfg.MaxConns = 2, 1 }, wantErrMsg: "maxConnecting must not exceed maxConns"},
+		{name: "secondary reads", mutate: func(cfg *MongoDB) { cfg.ReadPreference = "secondaryPreferred" }, wantErrMsg: "readPreference must be primary"},
+		{name: "non-majority writes", mutate: func(cfg *MongoDB) { cfg.WriteConcern = "w2" }, wantErrMsg: "writeConcern must be majority"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validMongoDB()
+			test.mutate(cfg)
+			err := (&DataStore{MongoDB: cfg}).Validate()
+			require.ErrorContains(t, err, test.wantErrMsg)
+		})
+	}
+
+	t.Run("MongoDB URI", func(t *testing.T) {
+		cfg := validMongoDB()
+		cfg.Hosts = nil
+		cfg.URI = "mongodb+srv://cluster.example.com"
+		err := (&DataStore{MongoDB: cfg}).Validate()
+		require.NoError(t, err)
+	})
+}
+
+func TestDataStoreGetIndexName_MongoDB(t *testing.T) {
+	store := DataStore{MongoDB: &MongoDB{DatabaseName: "temporal-visibility"}}
+	require.Equal(t, "temporal-visibility", store.GetIndexName())
+}
+
 func TestSQLValidate_PasswordOnly(t *testing.T) {
 	cfg := &SQL{Password: "static"}
 	err := cfg.validate()

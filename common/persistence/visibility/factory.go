@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/server/common/persistence/visibility/manager"
 	"go.temporal.io/server/common/persistence/visibility/store"
 	"go.temporal.io/server/common/persistence/visibility/store/elasticsearch"
+	visibilitymongodb "go.temporal.io/server/common/persistence/visibility/store/mongodb"
 	"go.temporal.io/server/common/persistence/visibility/store/sql"
 	"go.temporal.io/server/common/resolver"
 	"go.temporal.io/server/common/searchattribute"
@@ -267,6 +268,14 @@ func newVisibilityStoreFromDataStoreConfig(
 			logger,
 			metricsHandler,
 			serializer,
+		)
+	} else if dsConfig.MongoDB != nil {
+		visStore, err = visibilitymongodb.NewVisibilityStore(
+			*dsConfig.MongoDB,
+			searchAttributesProvider,
+			searchAttributesMapperProvider,
+			chasmRegistry,
+			logger,
 		)
 	} else if dsConfig.Elasticsearch != nil {
 		visStore, err = elasticsearch.NewVisibilityStore(
