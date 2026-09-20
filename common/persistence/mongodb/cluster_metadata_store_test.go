@@ -87,20 +87,44 @@ func (s *ClusterMetadataStoreSuite) TestSaveAndGetClusterMetadata() {
 func (s *ClusterMetadataStoreSuite) TestUpsertClusterMembership() {
 	hostID := []byte("test-host-id-1")
 	rpcAddress := net.ParseIP("127.0.0.1")
+	sessionStart := time.Now().UTC()
 
 	err := s.store.UpsertClusterMembership(s.ctx, &persistence.UpsertClusterMembershipRequest{
 		Role:         persistence.Frontend,
 		HostID:       hostID,
 		RPCAddress:   rpcAddress,
 		RPCPort:      7233,
-		SessionStart: time.Now().UTC(),
+		SessionStart: sessionStart,
 		RecordExpiry: 1 * time.Hour,
 	})
 	s.Require().NoError(err)
 
 	resp, err := s.store.GetClusterMembers(s.ctx, &persistence.GetClusterMembersRequest{
-		PageSize: 10,
+		HostIDEquals: hostID,
+		PageSize:     10,
 	})
 	s.Require().NoError(err)
-	s.Require().GreaterOrEqual(len(resp.ActiveMembers), 1)
+	s.Require().Len(resp.ActiveMembers, 1)
+	firstHeartbeat := resp.ActiveMembers[0].LastHeartbeat
+	firstExpiry := resp.ActiveMembers[0].RecordExpiry
+
+	err = s.store.UpsertClusterMembership(s.ctx, &persistence.UpsertClusterMembershipRequest{
+		Role:         persistence.Frontend,
+		HostID:       hostID,
+		RPCAddress:   rpcAddress,
+		RPCPort:      8233,
+		SessionStart: sessionStart,
+		RecordExpiry: 2 * time.Hour,
+	})
+	s.Require().NoError(err)
+
+	resp, err = s.store.GetClusterMembers(s.ctx, &persistence.GetClusterMembersRequest{
+		HostIDEquals: hostID,
+		PageSize:     10,
+	})
+	s.Require().NoError(err)
+	s.Require().Len(resp.ActiveMembers, 1)
+	s.Require().Equal(uint16(8233), resp.ActiveMembers[0].RPCPort)
+	s.Require().GreaterOrEqual(resp.ActiveMembers[0].LastHeartbeat, firstHeartbeat)
+	s.Require().Greater(resp.ActiveMembers[0].RecordExpiry, firstExpiry)
 }

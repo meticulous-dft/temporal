@@ -284,21 +284,21 @@ func (s *clusterMetadataStore) UpsertClusterMembership(
 ) error {
 	collection := s.db.Collection(collectionClusterMembership)
 
-	doc := clusterMembershipDocument{
-		HostID:        request.HostID,
-		RPCAddress:    request.RPCAddress.String(),
-		RPCPort:       request.RPCPort,
-		Role:          int32(request.Role),
-		SessionStart:  request.SessionStart,
-		LastHeartbeat: time.Now().UTC(),
-		RecordExpiry:  time.Now().UTC().Add(request.RecordExpiry),
+	now := time.Now().UTC()
+	update := bson.M{
+		"rpc_address":    request.RPCAddress.String(),
+		"rpc_port":       request.RPCPort,
+		"role":           int32(request.Role),
+		"session_start":  request.SessionStart,
+		"last_heartbeat": now,
+		"record_expiry":  now.Add(request.RecordExpiry),
 	}
 
 	opts := options.Update().SetUpsert(true)
 	_, err := collection.UpdateOne(
 		ctx,
 		bson.M{"_id": request.HostID},
-		bson.M{"$set": doc},
+		bson.M{"$set": update},
 		opts,
 	)
 	if err != nil {
