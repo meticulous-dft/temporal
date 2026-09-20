@@ -40,6 +40,7 @@ import (
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/cassandra"
 	persistenceClient "go.temporal.io/server/common/persistence/client"
+	"go.temporal.io/server/common/persistence/mongodb"
 	"go.temporal.io/server/common/persistence/serialization"
 	"go.temporal.io/server/common/persistence/sql"
 	"go.temporal.io/server/common/persistence/visibility"
@@ -909,6 +910,10 @@ func verifyPersistenceCompatibleVersion(
 	// cassandra schema version validation
 	if err := cassandra.VerifyCompatibleVersion(cfg, persistenceServiceResolver, logger); err != nil {
 		return fmt.Errorf("cassandra schema version compatibility check failed: %w", err)
+	}
+	// mongodb schema version validation
+	if err := mongodb.VerifyCompatibleVersion(cfg, persistenceServiceResolver, logger); err != nil {
+		return err
 	}
 	// sql schema version validation
 	if err := sql.VerifyCompatibleVersion(cfg, persistenceServiceResolver, logger); err != nil {

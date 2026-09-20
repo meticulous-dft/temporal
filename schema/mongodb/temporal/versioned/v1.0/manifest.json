@@ -1,0 +1,8 @@
+{
+  "CurrVersion": "1.0",
+  "MinCompatibleVersion": "1.0",
+  "Description": "Initial Temporal MongoDB default persistence schema",
+  "SchemaUpdateFiles": [
+    "schema.json"
+  ]
+}

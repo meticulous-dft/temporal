@@ -1,0 +1,21 @@
+[
+  { "create": "visibility" },
+  {
+    "createIndexes": "visibility",
+    "indexes": [
+      {
+        "key": { "NamespaceId": 1, "_deleted": 1, "_close_time_sort": -1, "StartTime": -1, "RunId": -1 },
+        "name": "visibility_default"
+      },
+      {
+        "key": { "NamespaceId": 1, "_deleted": 1, "WorkflowId": 1, "_close_time_sort": -1, "StartTime": -1, "RunId": -1 },
+        "name": "visibility_workflow_id"
+      },
+      {
+        "key": { "NamespaceId": 1, "_deleted": 1, "$**": 1 },
+        "name": "visibility_search_attributes",
+        "wildcardProjection": { "NamespaceId": 0, "_deleted": 0, "_id": 0 }
+      }
+    ]
+  }
+]

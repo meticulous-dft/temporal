@@ -1,0 +1,57 @@
+name: temporal-mongodb-sharded-qualification
+
+services:
+  mongodb-sharded-qualification:
+    image: mongo:8.0
+    container_name: temporal-mongodb-sharded-qualification
+    entrypoint:
+      - "/bin/bash"
+      - "/mongodb-sharded-qualification-entrypoint.sh"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: temporal
+      MONGO_INITDB_ROOT_PASSWORD: temporal
+      MONGO_REPLICA_SET_KEY: temporalmongodbshardedqualificationkeymaterialmustbeshared1234567890
+    ports:
+      - "27017:27017"
+      - "27018:27018"
+      - "27101:27101"
+      - "27102:27102"
+      - "27103:27103"
+      - "27201:27201"
+      - "27202:27202"
+      - "27203:27203"
+      - "27301:27301"
+      - "27302:27302"
+      - "27303:27303"
+    volumes:
+      - ./mongodb-sharded-qualification-entrypoint.sh:/mongodb-sharded-qualification-entrypoint.sh:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'mongosh --quiet "mongodb://$$MONGO_INITDB_ROOT_USERNAME:$$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/admin" --eval ''const hello = db.adminCommand({ hello: 1 }); const shards = db.adminCommand({ listShards: 1 }); if (hello.msg !== "isdbgrid" || shards.shards.length !== 2) { quit(2); }''',
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  elasticsearch-qualification:
+    image: elasticsearch:7.10.1
+    container_name: temporal-mongodb-sharded-elasticsearch-qualification
+    ports:
+      - "9200:9200"
+    environment:
+      - network.host=_local_,_site_
+      - network.publish_host=_local_
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms100m -Xmx100m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 60

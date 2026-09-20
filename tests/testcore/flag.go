@@ -35,3 +35,7 @@ func UseSQLVisibility() bool {
 func UseCassandraPersistence() bool {
 	return cliFlags.persistenceType == config.StoreTypeNoSQL && cliFlags.persistenceDriver == "cassandra"
 }
+
+func UseMongoDBPersistence() bool {
+	return cliFlags.persistenceType == config.StoreTypeNoSQL && cliFlags.persistenceDriver == "mongodb"
+}

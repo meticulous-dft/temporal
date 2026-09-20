@@ -237,7 +237,10 @@ func newClusterWithPersistenceTestBaseFactory(
 	var (
 		esClient esclient.Client
 	)
-	if !UseSQLVisibility() {
+	if UseMongoDBPersistence() {
+		clusterConfig.ESConfig = nil
+		pConfig.VisibilityStore = pConfig.DefaultStore
+	} else if !UseSQLVisibility() {
 		clusterConfig.ESConfig = &esclient.Config{
 			Indices: map[string]string{
 				esclient.VisibilityAppName: RandomizeStr("temporal_visibility_v1_test"),

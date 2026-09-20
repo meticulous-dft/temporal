@@ -88,6 +88,7 @@ func (s *ExecutionMutableStateSuite) TearDownSuite() {
 
 func (s *ExecutionMutableStateSuite) SetupTest() {
 	s.Assertions = require.New(s.T())
+	s.ProtoAssertions = protorequire.New(s.T())
 	s.Ctx, s.Cancel = context.WithTimeout(context.Background(), 30*time.Second*debug.TimeoutMultiplier)
 
 	s.ShardID++
@@ -524,6 +525,99 @@ func (s *ExecutionMutableStateSuite) TestUpdate_NotZombie() {
 
 	s.AssertMSEqualWithDB(chasm.WorkflowArchetypeID, newSnapshot, currentMutation)
 	s.AssertHEEqualWithDB(branchToken, newEvents, currentEvents)
+}
+
+func (s *ExecutionMutableStateSuite) TestUpdateAppendsBufferedEventBatches() {
+	branchToken, snapshot, createEvents := s.CreateWorkflow(
+		rand.Int63(),
+		enumsspb.WORKFLOW_EXECUTION_STATE_CREATED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		1,
+	)
+
+	firstWriteVersion := rand.Int63()
+	firstMutation, firstEvents := RandomMutation(
+		s.T(),
+		s.NamespaceID,
+		s.WorkflowID,
+		s.RunID,
+		snapshot.NextEventID,
+		firstWriteVersion,
+		enumsspb.WORKFLOW_EXECUTION_STATE_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		2,
+		branchToken,
+	)
+	firstMutation.ClearBufferedEvents = false
+	firstMutation.NewBufferedEvents = []*historypb.HistoryEvent{
+		RandomHistoryEvent(snapshot.NextEventID, firstWriteVersion),
+	}
+	_, err := s.ExecutionManager.UpdateWorkflowExecution(s.Ctx, &p.UpdateWorkflowExecutionRequest{
+		ShardID:                s.ShardID,
+		RangeID:                s.RangeID,
+		Mode:                   p.UpdateWorkflowModeUpdateCurrent,
+		ArchetypeID:            chasm.WorkflowArchetypeID,
+		UpdateWorkflowMutation: *firstMutation,
+		UpdateWorkflowEvents:   firstEvents,
+	})
+	s.NoError(err)
+
+	secondWriteVersion := rand.Int63()
+	secondMutation, secondEvents := RandomMutation(
+		s.T(),
+		s.NamespaceID,
+		s.WorkflowID,
+		s.RunID,
+		firstMutation.NextEventID,
+		secondWriteVersion,
+		enumsspb.WORKFLOW_EXECUTION_STATE_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		3,
+		branchToken,
+	)
+	secondMutation.ClearBufferedEvents = false
+	secondMutation.NewBufferedEvents = []*historypb.HistoryEvent{
+		RandomHistoryEvent(firstMutation.NextEventID, secondWriteVersion),
+	}
+	_, err = s.ExecutionManager.UpdateWorkflowExecution(s.Ctx, &p.UpdateWorkflowExecutionRequest{
+		ShardID:                s.ShardID,
+		RangeID:                s.RangeID,
+		Mode:                   p.UpdateWorkflowModeUpdateCurrent,
+		ArchetypeID:            chasm.WorkflowArchetypeID,
+		UpdateWorkflowMutation: *secondMutation,
+		UpdateWorkflowEvents:   secondEvents,
+	})
+	s.NoError(err)
+
+	s.AssertMSEqualWithDB(chasm.WorkflowArchetypeID, snapshot, firstMutation, secondMutation)
+	s.AssertHEEqualWithDB(branchToken, createEvents, firstEvents, secondEvents)
+
+	clearMutation, clearEvents := RandomMutation(
+		s.T(),
+		s.NamespaceID,
+		s.WorkflowID,
+		s.RunID,
+		secondMutation.NextEventID,
+		rand.Int63(),
+		enumsspb.WORKFLOW_EXECUTION_STATE_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		4,
+		branchToken,
+	)
+	clearMutation.ClearBufferedEvents = true
+	clearMutation.NewBufferedEvents = nil
+	_, err = s.ExecutionManager.UpdateWorkflowExecution(s.Ctx, &p.UpdateWorkflowExecutionRequest{
+		ShardID:                s.ShardID,
+		RangeID:                s.RangeID,
+		Mode:                   p.UpdateWorkflowModeUpdateCurrent,
+		ArchetypeID:            chasm.WorkflowArchetypeID,
+		UpdateWorkflowMutation: *clearMutation,
+		UpdateWorkflowEvents:   clearEvents,
+	})
+	s.NoError(err)
+
+	s.AssertMSEqualWithDB(chasm.WorkflowArchetypeID, snapshot, firstMutation, secondMutation, clearMutation)
+	s.AssertHEEqualWithDB(branchToken, createEvents, firstEvents, secondEvents, clearEvents)
 }
 
 func (s *ExecutionMutableStateSuite) TestUpdate_NotZombie_CHASM() {
@@ -2372,8 +2466,8 @@ func (s *ExecutionMutableStateSuite) TestDelete_NotExists() {
 }
 
 func (s *ExecutionMutableStateSuite) TestListConcreteExecutions() {
-	if !strings.HasPrefix(s.T().Name(), "TestCassandra") {
-		s.T().Skip("ListConcreteExecutions is only implemented by cassandra persistence")
+	if !strings.HasPrefix(s.T().Name(), "TestCassandra") && !strings.HasPrefix(s.T().Name(), "TestMongoDB") {
+		s.T().Skip("ListConcreteExecutions is only implemented by Cassandra and MongoDB persistence")
 	}
 
 	_, workflowSnapshot, _ := s.CreateWorkflow(
@@ -2734,7 +2828,7 @@ func (s *ExecutionMutableStateSuite) assertHEWithDB(
 	if !assertPrefix {
 		s.Nil(resp.NextPageToken)
 	}
-	s.Equal(len(historyEvents), len(resp.HistoryEvents))
+	s.Len(resp.HistoryEvents, len(historyEvents))
 	for i, event := range historyEvents {
 		s.ProtoEqual(event, resp.HistoryEvents[i])
 	}
