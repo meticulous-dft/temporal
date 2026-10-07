@@ -91,9 +91,9 @@ func (s *AdvancedVisibilitySuite) SetupSuite() {
 		// Enable external payload tracking for TestListWorkflow_ExternalPayloadSearchAttributes
 		dynamicconfig.ExternalPayloadsEnabled.Key(): true,
 	}
-	s.FunctionalTestBase.SetupSuiteWithCluster(testcore.WithDynamicConfigOverrides(dynamicConfigOverrides))
+	s.SetupSuiteWithCluster(testcore.WithDynamicConfigOverrides(dynamicConfigOverrides))
 
-	if !testcore.UseSQLVisibility() {
+	if !testcore.UseSQLVisibility() && !testcore.UseMongoDBPersistence() {
 		// To ensure that Elasticsearch won't return more than defaultPageSize documents,
 		// but returns error if page size on request is greater than defaultPageSize.
 		// Probably can be removed and replaced with assert on items count in response.

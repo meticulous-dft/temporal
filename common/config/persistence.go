@@ -143,6 +143,8 @@ func (ds *DataStore) GetIndexName() string {
 		return ds.SQL.DatabaseName
 	case ds.Cassandra != nil:
 		return ds.Cassandra.Keyspace
+	case ds.MongoDB != nil:
+		return ds.MongoDB.DatabaseName
 	case ds.Elasticsearch != nil:
 		return ds.Elasticsearch.GetVisibilityIndex()
 	case ds.CustomDataStoreConfig != nil:
@@ -161,6 +163,9 @@ func (ds *DataStore) Validate() error {
 	if ds.Cassandra != nil {
 		storeConfigCount++
 	}
+	if ds.MongoDB != nil {
+		storeConfigCount++
+	}
 	if ds.CustomDataStoreConfig != nil {
 		storeConfigCount++
 	}
@@ -170,7 +175,7 @@ func (ds *DataStore) Validate() error {
 	if storeConfigCount != 1 {
 		return errors.New(
 			"must provide config for one and only one datastore: " +
-				"elasticsearch, cassandra, sql or custom store",
+				"elasticsearch, cassandra, sql, mongodb or custom store",
 		)
 	}
 
@@ -184,6 +189,11 @@ func (ds *DataStore) Validate() error {
 	}
 	if ds.Cassandra != nil {
 		if err := ds.Cassandra.validate(); err != nil {
+			return err
+		}
+	}
+	if ds.MongoDB != nil {
+		if err := ds.MongoDB.validate(); err != nil {
 			return err
 		}
 	}
@@ -232,6 +242,44 @@ func ensureStoreConsistencyNotNil(c *CassandraStoreConsistency) *CassandraStoreC
 
 func (c *Cassandra) validate() error {
 	return c.Consistency.validate()
+}
+
+func (m *MongoDB) validate() error {
+	hasURI := strings.TrimSpace(m.URI) != ""
+	hasHosts := len(m.Hosts) > 0
+	if hasURI == hasHosts {
+		return errors.New("mongodb exactly one of uri or hosts must be configured")
+	}
+	for _, host := range m.Hosts {
+		if strings.TrimSpace(host) == "" {
+			return errors.New("mongodb hosts must not contain empty values")
+		}
+	}
+	if strings.TrimSpace(m.DatabaseName) == "" {
+		return errors.New("mongodb databaseName must not be empty")
+	}
+	if (m.User == "") != (m.Password == "") {
+		return errors.New("mongodb user and password must be configured together")
+	}
+	if m.MaxConns < 0 || m.MinConns < 0 || m.MaxConnecting < 0 {
+		return errors.New("mongodb connection pool sizes must not be negative")
+	}
+	if m.MaxConns > 0 && m.MinConns > m.MaxConns {
+		return errors.New("mongodb minConns must not exceed maxConns")
+	}
+	if m.MaxConns > 0 && m.MaxConnecting > m.MaxConns {
+		return errors.New("mongodb maxConnecting must not exceed maxConns")
+	}
+	if m.ConnectTimeout < 0 || m.ConnIdleTime < 0 {
+		return errors.New("mongodb connection timeouts must not be negative")
+	}
+	if readPreference := strings.ToLower(strings.TrimSpace(m.ReadPreference)); readPreference != "" && readPreference != "primary" {
+		return fmt.Errorf("mongodb readPreference must be primary, got %q", m.ReadPreference)
+	}
+	if writeConcern := strings.ToLower(strings.TrimSpace(m.WriteConcern)); writeConcern != "" && writeConcern != "majority" {
+		return fmt.Errorf("mongodb writeConcern must be majority, got %q", m.WriteConcern)
+	}
+	return nil
 }
 
 func (c *CassandraStoreConsistency) validate() error {

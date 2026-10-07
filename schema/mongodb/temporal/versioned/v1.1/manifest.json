@@ -1,0 +1,8 @@
+{
+  "CurrVersion": "1.1",
+  "MinCompatibleVersion": "1.0",
+  "Description": "Add native MongoDB visibility storage",
+  "SchemaUpdateFiles": [
+    "schema.json"
+  ]
+}

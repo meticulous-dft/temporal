@@ -67,7 +67,9 @@ import (
 
 type (
 	TemporalImpl struct {
-		fxApps []*fx.App
+		fxApps                 []*fx.App
+		serviceApps            map[primitives.ServiceName][]*fx.App
+		namespaceRegistryByApp map[*fx.App]namespace.Registry
 
 		// This is used to wait for namespace registries to have noticed a change in some xdc tests.
 		namespaceRegistries []namespace.Registry
@@ -224,6 +226,8 @@ func newTemporal(t *testing.T, params *TemporalParams) *TemporalImpl {
 		grpcClientInterceptor:            grpcinject.NewInterceptor(),
 		replicationStreamRecorder:        NewReplicationStreamRecorder(),
 		spanExporters:                    params.SpanExporters,
+		serviceApps:                      make(map[primitives.ServiceName][]*fx.App),
+		namespaceRegistryByApp:           make(map[*fx.App]namespace.Registry),
 	}
 
 	// Configure output file path for on-demand logging (call WriteToLog() to write)
@@ -266,6 +270,75 @@ func (c *TemporalImpl) Stop() error {
 	}
 
 	return multierr.Combine(errs...)
+}
+
+func (c *TemporalImpl) StopService(ctx context.Context, serviceName primitives.ServiceName) error {
+	if serviceName != primitives.HistoryService && serviceName != primitives.MatchingService {
+		return fmt.Errorf("restarting %s is not supported by the test cluster", serviceName)
+	}
+	apps := c.serviceApps[serviceName]
+	if len(apps) == 0 {
+		return fmt.Errorf("service %s is not running", serviceName)
+	}
+
+	appsToStop := slices.Clone(apps)
+	slices.Reverse(appsToStop)
+	var errs []error
+	for _, app := range appsToStop {
+		errs = append(errs, app.Stop(ctx))
+	}
+	if err := multierr.Combine(errs...); err != nil {
+		return err
+	}
+
+	stopped := make(map[*fx.App]struct{}, len(apps))
+	for _, app := range apps {
+		stopped[app] = struct{}{}
+	}
+	remainingApps := c.fxApps[:0]
+	for _, app := range c.fxApps {
+		if _, ok := stopped[app]; !ok {
+			remainingApps = append(remainingApps, app)
+		}
+	}
+	c.fxApps = remainingApps
+	c.namespaceRegistries = c.namespaceRegistries[:0]
+	for _, app := range remainingApps {
+		if registry, ok := c.namespaceRegistryByApp[app]; ok {
+			c.namespaceRegistries = append(c.namespaceRegistries, registry)
+		}
+	}
+	for app := range stopped {
+		delete(c.namespaceRegistryByApp, app)
+	}
+	delete(c.serviceApps, serviceName)
+	return nil
+}
+
+func (c *TemporalImpl) StartService(serviceName primitives.ServiceName) error {
+	if len(c.serviceApps[serviceName]) != 0 {
+		return fmt.Errorf("service %s is already running", serviceName)
+	}
+	switch serviceName {
+	case primitives.HistoryService:
+		c.startHistory()
+	case primitives.MatchingService:
+		c.startMatching()
+	default:
+		return fmt.Errorf("restarting %s is not supported by the test cluster", serviceName)
+	}
+	return nil
+}
+
+func (c *TemporalImpl) addServiceApp(
+	serviceName primitives.ServiceName,
+	app *fx.App,
+	namespaceRegistry namespace.Registry,
+) {
+	c.fxApps = append(c.fxApps, app)
+	c.serviceApps[serviceName] = append(c.serviceApps[serviceName], app)
+	c.namespaceRegistries = append(c.namespaceRegistries, namespaceRegistry)
+	c.namespaceRegistryByApp[app] = namespaceRegistry
 }
 
 func (c *TemporalImpl) makeHostMap(serviceName primitives.ServiceName, self string) map[primitives.ServiceName]static.Hosts {
@@ -430,8 +503,7 @@ func (c *TemporalImpl) startFrontend() {
 			logger.Fatal("unable to construct frontend service", tag.Error(err))
 		}
 
-		c.fxApps = append(c.fxApps, app)
-		c.namespaceRegistries = append(c.namespaceRegistries, namespaceRegistry)
+		c.addServiceApp(serviceName, app, namespaceRegistry)
 
 		if err := app.Start(context.Background()); err != nil {
 			logger.Fatal("unable to start frontend service", tag.Error(err))
@@ -530,8 +602,7 @@ func (c *TemporalImpl) startHistory() {
 		if err != nil {
 			logger.Fatal("unable to construct history service", tag.Error(err))
 		}
-		c.fxApps = append(c.fxApps, app)
-		c.namespaceRegistries = append(c.namespaceRegistries, namespaceRegistry)
+		c.addServiceApp(serviceName, app, namespaceRegistry)
 
 		if err := app.Start(context.Background()); err != nil {
 			logger.Fatal("unable to start history service", tag.Error(err))
@@ -587,8 +658,7 @@ func (c *TemporalImpl) startMatching() {
 		if err != nil {
 			logger.Fatal("unable to start matching service", tag.Error(err))
 		}
-		c.fxApps = append(c.fxApps, app)
-		c.namespaceRegistries = append(c.namespaceRegistries, namespaceRegistry)
+		c.addServiceApp(serviceName, app, namespaceRegistry)
 		if err := app.Start(context.Background()); err != nil {
 			logger.Fatal("unable to start matching service", tag.Error(err))
 		}
@@ -655,8 +725,7 @@ func (c *TemporalImpl) startWorker() {
 			logger.Fatal("unable to start worker service", tag.Error(err))
 		}
 
-		c.fxApps = append(c.fxApps, app)
-		c.namespaceRegistries = append(c.namespaceRegistries, namespaceRegistry)
+		c.addServiceApp(serviceName, app, namespaceRegistry)
 		if err := app.Start(context.Background()); err != nil {
 			logger.Fatal("unable to start worker service", tag.Error(err))
 		}

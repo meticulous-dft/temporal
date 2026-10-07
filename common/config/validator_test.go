@@ -76,3 +76,14 @@ func TestValidateVisibilityConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateMongoDBConfigWithURI(t *testing.T) {
+	validate := newValidator()
+
+	err := validate.Validate(MongoDB{
+		URI:          "mongodb+srv://cluster.example.com",
+		DatabaseName: "temporal",
+	})
+
+	require.NoError(t, err)
+}
