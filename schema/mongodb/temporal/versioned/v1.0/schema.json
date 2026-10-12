@@ -1,38 +1,56 @@
 [
   { "create": "shards" },
+  { "create": "history_records" },
+  {
+    "createIndexes": "history_records",
+    "indexes": [
+      { "key": { "shard_id": 1, "storage_bucket": 1, "record_kind": 1, "_id": 1 }, "name": "history_records_identity", "unique": true },
+      { "key": { "shard_id": 1, "storage_bucket": 1, "record_kind": 1 }, "name": "history_bucket_fence_unique", "unique": true, "partialFilterExpression": { "record_kind": "fence" } },
+      { "key": { "shard_id": 1, "record_kind": 1, "category_id": 1, "_id": 1 }, "name": "history_tasks_ordered" },
+      { "key": { "shard_id": 1, "record_kind": 1, "_id": 1 }, "name": "history_records_scan" }
+    ]
+  },
   { "create": "namespaces" },
   { "createIndexes": "namespaces", "indexes": [{ "key": { "name": 1 }, "name": "namespaces_name_unique", "unique": true }] },
   { "create": "namespace_metadata" },
   { "create": "cluster_metadata" },
   { "create": "cluster_membership" },
-  { "create": "executions" },
-  { "create": "current_executions" },
   { "create": "history_branches" },
-  { "create": "history_nodes" },
-  { "create": "transfer_tasks" },
-  { "create": "timer_tasks" },
-  { "create": "replication_tasks" },
-  { "create": "visibility_tasks" },
-  { "create": "replication_dlq_tasks" },
-  { "create": "task_queues" },
   {
-    "createIndexes": "task_queues",
+    "createIndexes": "history_branches",
     "indexes": [
-      {
-        "key": { "namespace_id": 1, "task_queue": 1, "task_type": 1, "subqueue": 1 },
-        "name": "task_queue_lookup"
-      }
+      { "key": { "tree_id": 1, "branch_id": 1 }, "name": "history_branches_tree_branch", "unique": true },
+      { "key": { "shard_id": 1, "tree_id": 1, "branch_id": 1 }, "name": "history_branches_scan" }
     ]
   },
-  { "create": "tasks" },
+  { "create": "history_nodes" },
   {
-    "createIndexes": "tasks",
+    "createIndexes": "history_nodes",
+    "indexes": [
+      { "key": { "tree_id": 1, "branch_id": 1, "node_id": 1, "txn_id": -1 }, "name": "history_nodes_forward", "unique": true },
+      { "key": { "tree_id": 1, "branch_id": 1, "node_id": -1, "txn_id": -1 }, "name": "history_nodes_reverse" }
+    ]
+  },
+  { "create": "replication_dlq_tasks" },
+  { "create": "matching_records" },
+  {
+    "createIndexes": "matching_records",
     "indexes": [
       {
-        "key": { "namespace_id": 1, "task_queue": 1, "task_type": 1, "subqueue": 1, "task_pass": 1, "task_id": 1 },
+        "key": { "namespace_id": 1, "task_queue": 1, "task_type": 1, "record_kind": 1, "subqueue": 1 },
+        "name": "task_queue_lookup"
+      },
+      { "key": { "namespace_id": 1, "task_queue": 1, "task_type": 1, "record_kind": 1, "_id": 1 }, "name": "matching_records_identity", "unique": true }
+    ]
+  },
+  {
+    "createIndexes": "matching_records",
+    "indexes": [
+      {
+        "key": { "namespace_id": 1, "task_queue": 1, "task_type": 1, "record_kind": 1, "subqueue": 1, "task_pass": 1, "task_id": 1 },
         "name": "tasks_lookup"
       },
-      { "key": { "expiry_time": 1 }, "name": "tasks_ttl", "expireAfterSeconds": 0 }
+      { "key": { "expiry_time": 1 }, "name": "tasks_ttl", "expireAfterSeconds": 0, "partialFilterExpression": { "record_kind": "task" } }
     ]
   },
   { "create": "task_queue_user_data" },

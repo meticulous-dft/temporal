@@ -201,7 +201,21 @@ func TestAppendFirstHistoryNodeRollsBackWhenBranchWriteFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 
-	factory, _ := newFencingTestFactory(t, "hist")
+	factory, cfg := newFencingTestFactory(t, "hist")
+	if factory.topologyInfo.Type == client.TopologySharded {
+		for _, placement := range []struct{ collection, shard string }{
+			{collectionHistoryNodes, "shard-rs-0"},
+			{collectionHistoryBranches, "shard-rs-1"},
+		} {
+			require.NoError(t, runAdminCommand(ctx, factory, bson.D{
+				{Key: "moveChunk", Value: cfg.DatabaseName + "." + placement.collection},
+				{Key: "find", Value: bson.D{{Key: "tree_id", Value: "tree-id"}}},
+				{Key: "to", Value: placement.shard},
+			}))
+			require.Equal(t, placement.shard, explainTargetShard(ctx, t, factory, placement.collection,
+				bson.D{{Key: "tree_id", Value: "tree-id"}}))
+		}
+	}
 	storeValue, err := factory.NewExecutionStore()
 	require.NoError(t, err)
 	store, ok := storeValue.(*executionStore)

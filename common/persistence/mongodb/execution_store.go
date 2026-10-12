@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -116,21 +115,25 @@ type (
 	}
 
 	immediateTaskDocument struct {
-		ID         string       `bson:"_id"`
-		ShardID    int32        `bson:"shard_id"`
-		CategoryID int          `bson:"category_id"`
-		TaskID     int64        `bson:"task_id"`
-		FireTime   time.Time    `bson:"fire_time"`
-		Blob       *dataBlobDoc `bson:"blob,omitempty"`
+		StorageBucket int32        `bson:"storage_bucket"`
+		RecordKind    string       `bson:"record_kind"`
+		ID            string       `bson:"_id"`
+		ShardID       int32        `bson:"shard_id"`
+		CategoryID    int          `bson:"category_id"`
+		TaskID        int64        `bson:"task_id"`
+		FireTime      time.Time    `bson:"fire_time"`
+		Blob          *dataBlobDoc `bson:"blob,omitempty"`
 	}
 
 	scheduledTaskDocument struct {
-		ID         string       `bson:"_id"`
-		ShardID    int32        `bson:"shard_id"`
-		CategoryID int          `bson:"category_id"`
-		FireTime   time.Time    `bson:"fire_time"`
-		TaskID     int64        `bson:"task_id"`
-		Blob       *dataBlobDoc `bson:"blob,omitempty"`
+		StorageBucket int32        `bson:"storage_bucket"`
+		RecordKind    string       `bson:"record_kind"`
+		ID            string       `bson:"_id"`
+		ShardID       int32        `bson:"shard_id"`
+		CategoryID    int          `bson:"category_id"`
+		FireTime      time.Time    `bson:"fire_time"`
+		TaskID        int64        `bson:"task_id"`
+		Blob          *dataBlobDoc `bson:"blob,omitempty"`
 	}
 
 	replicationDLQDocument struct {
@@ -142,6 +145,8 @@ type (
 	}
 
 	executionDocument struct {
+		StorageBucket        int32            `bson:"storage_bucket"`
+		RecordKind           string           `bson:"record_kind"`
 		ID                   string           `bson:"_id"`
 		ShardID              int32            `bson:"shard_id"`
 		NamespaceID          string           `bson:"namespace_id"`
@@ -175,6 +180,8 @@ type (
 	}
 
 	currentExecutionDocument struct {
+		StorageBucket    int32      `bson:"storage_bucket"`
+		RecordKind       string     `bson:"record_kind"`
 		ID               string     `bson:"_id"`
 		ShardID          int32      `bson:"shard_id"`
 		NamespaceID      string     `bson:"namespace_id"`
@@ -228,14 +235,14 @@ func NewExecutionStore(
 		logger:              logger,
 		transactionsEnabled: transactionsEnabled,
 		serializer:          serialization.NewSerializer(),
-		executionsCol:       db.Collection(collectionExecutions),
-		currentExecsCol:     db.Collection(collectionCurrentExecutions),
+		executionsCol:       db.Collection(collectionHistoryRecords),
+		currentExecsCol:     db.Collection(collectionHistoryRecords),
 		historyBranchesCol:  db.Collection(collectionHistoryBranches),
 		historyNodesCol:     db.Collection(collectionHistoryNodes),
-		transferTasksCol:    db.Collection(collectionTransferTasks),
-		timerTasksCol:       db.Collection(collectionTimerTasks),
-		replicationTasksCol: db.Collection(collectionReplicationTasks),
-		visibilityTasksCol:  db.Collection(collectionVisibilityTasks),
+		transferTasksCol:    db.Collection(collectionHistoryRecords),
+		timerTasksCol:       db.Collection(collectionHistoryRecords),
+		replicationTasksCol: db.Collection(collectionHistoryRecords),
+		visibilityTasksCol:  db.Collection(collectionHistoryRecords),
 		replicationDLQCol:   db.Collection(collectionReplicationDLQ),
 	}
 
@@ -269,14 +276,14 @@ func (s *executionStore) ensureIndexes(ctx context.Context) error {
 }
 
 func executionDocID(namespaceID, workflowID, runID string) string {
-	return fmt.Sprintf("%s|%s|%s", namespaceID, workflowID, runID)
+	return fmt.Sprintf("state|%s|%s|%s", namespaceID, workflowID, runID)
 }
 
 func currentExecutionDocID(namespaceID, workflowID string, archetypeID chasm.ArchetypeID) string {
 	if archetypeID == chasm.UnspecifiedArchetypeID || archetypeID == chasm.WorkflowArchetypeID {
-		return fmt.Sprintf("%s|%s", namespaceID, workflowID)
+		return fmt.Sprintf("current|%s|%s", namespaceID, workflowID)
 	}
-	return fmt.Sprintf("%s|%s|%d", namespaceID, workflowID, archetypeID)
+	return fmt.Sprintf("current|%s|%s|%d", namespaceID, workflowID, archetypeID)
 }
 
 func timePtrFromProto(ts *timestamppb.Timestamp) *time.Time {
@@ -469,11 +476,11 @@ func historyNodeDocID(treeID, branchID string, nodeID, txnID int64) string {
 }
 
 func immediateTaskDocID(shardID int32, categoryID int, taskID int64) string {
-	return fmt.Sprintf("%d|%d|%s", shardID, categoryID, sortableInt64(taskID))
+	return fmt.Sprintf("task|%d|%d|%s", shardID, categoryID, sortableInt64(taskID))
 }
 
 func scheduledTaskDocID(shardID int32, categoryID int, fireTime time.Time, taskID int64) string {
-	return fmt.Sprintf("%d|%d|%s|%s", shardID, categoryID, fireTime.UTC().Format("2006-01-02T15:04:05.000000000Z07:00"), sortableInt64(taskID))
+	return fmt.Sprintf("task|%d|%d|%s|%s", shardID, categoryID, fireTime.UTC().Format("2006-01-02T15:04:05.000000000Z07:00"), sortableInt64(taskID))
 }
 
 func immediateDocIDForKey(shardID int32, categoryID int, key taskspkg.Key) string {
@@ -518,6 +525,7 @@ func (s *executionStore) insertHistoryTaskDoc(
 	categoryType taskspkg.CategoryType,
 	categoryID int,
 	shardID int32,
+	storageBucket int32,
 	task persistence.InternalHistoryTask,
 ) error {
 	if err := taskspkg.ValidateKey(task.Key); err != nil {
@@ -528,12 +536,14 @@ func (s *executionStore) insertHistoryTaskDoc(
 	switch categoryType {
 	case taskspkg.CategoryTypeImmediate:
 		doc := immediateTaskDocument{
-			ID:         immediateDocIDForKey(shardID, categoryID, task.Key),
-			ShardID:    shardID,
-			CategoryID: categoryID,
-			TaskID:     task.Key.TaskID,
-			FireTime:   task.Key.FireTime.UTC(),
-			Blob:       blobDoc,
+			StorageBucket: storageBucket,
+			RecordKind:    "task",
+			ID:            immediateDocIDForKey(shardID, categoryID, task.Key),
+			ShardID:       shardID,
+			CategoryID:    categoryID,
+			TaskID:        task.Key.TaskID,
+			FireTime:      task.Key.FireTime.UTC(),
+			Blob:          blobDoc,
 		}
 		if _, err := col.InsertOne(ctx, doc); err != nil {
 			if mongo.IsDuplicateKeyError(err) {
@@ -543,12 +553,14 @@ func (s *executionStore) insertHistoryTaskDoc(
 		}
 	case taskspkg.CategoryTypeScheduled:
 		doc := scheduledTaskDocument{
-			ID:         scheduledDocIDForKey(shardID, categoryID, task.Key),
-			ShardID:    shardID,
-			CategoryID: categoryID,
-			FireTime:   task.Key.FireTime.UTC(),
-			TaskID:     task.Key.TaskID,
-			Blob:       blobDoc,
+			StorageBucket: storageBucket,
+			RecordKind:    "task",
+			ID:            scheduledDocIDForKey(shardID, categoryID, task.Key),
+			ShardID:       shardID,
+			CategoryID:    categoryID,
+			FireTime:      task.Key.FireTime.UTC(),
+			TaskID:        task.Key.TaskID,
+			Blob:          blobDoc,
 		}
 		if _, err := col.InsertOne(ctx, doc); err != nil {
 			if mongo.IsDuplicateKeyError(err) {
@@ -565,6 +577,7 @@ func (s *executionStore) insertHistoryTaskDoc(
 func (s *executionStore) insertWorkflowTasks(
 	ctx context.Context,
 	shardID int32,
+	namespaceID, workflowID string,
 	tasksByCategory map[taskspkg.Category][]persistence.InternalHistoryTask,
 ) error {
 	if len(tasksByCategory) == 0 {
@@ -582,7 +595,7 @@ func (s *executionStore) insertWorkflowTasks(
 		}
 
 		for _, task := range taskList {
-			if err := s.insertHistoryTaskDoc(ctx, col, categoryType, categoryID, shardID, task); err != nil {
+			if err := s.insertHistoryTaskDoc(ctx, col, categoryType, categoryID, shardID, workflowStorageBucket(namespaceID, workflowID), task); err != nil {
 				return err
 			}
 		}
@@ -602,6 +615,7 @@ func buildHistoryTaskFilter(
 	filter := bson.M{
 		"shard_id":    shardID,
 		"category_id": categoryID,
+		"record_kind": "task",
 	}
 
 	idCond := bson.M{}
@@ -712,8 +726,8 @@ func decodeScheduledHistoryTasks(
 		fireTime := doc.FireTime.UTC()
 		// Try to parse high-precision time from ID
 		parts := strings.Split(doc.ID, "|")
-		if len(parts) >= 3 {
-			if parsed, err := time.Parse(time.RFC3339Nano, parts[2]); err == nil {
+		if len(parts) >= 4 {
+			if parsed, err := time.Parse(time.RFC3339Nano, parts[3]); err == nil {
 				fireTime = parsed.UTC()
 			}
 		}
@@ -910,7 +924,7 @@ func executionDocumentUpdateSet(doc *executionDocument) bson.M {
 }
 
 func (s *executionStore) loadExecutionDocument(ctx context.Context, shardID int32, namespaceID, workflowID, runID string) (*executionDocument, error) {
-	filter := bson.M{"_id": executionDocID(namespaceID, workflowID, runID), "shard_id": shardID}
+	filter := workflowRecordFilter(shardID, namespaceID, workflowID, "state", executionDocID(namespaceID, workflowID, runID))
 	var doc executionDocument
 	if err := s.executionsCol.FindOne(ctx, filter).Decode(&doc); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -1088,9 +1102,11 @@ func (s *executionStore) updateCurrentExecutionForMutation(
 	dbRecordVersion int64,
 ) error {
 	filter := bson.M{
-		"_id":      currentExecutionDocID(namespaceID, workflowID, archetypeID),
-		"shard_id": shardID,
-		"run_id":   state.GetRunId(),
+		"_id":            currentExecutionDocID(namespaceID, workflowID, archetypeID),
+		"shard_id":       shardID,
+		"run_id":         state.GetRunId(),
+		"storage_bucket": workflowStorageBucket(namespaceID, workflowID),
+		"record_kind":    "current",
 	}
 	set := bson.M{
 		"create_request_id":  state.GetCreateRequestId(),
@@ -1135,9 +1151,11 @@ func (s *executionStore) updateCurrentExecutionForConflict(
 	}
 
 	filter := bson.M{
-		"_id":      currentExecutionDocID(namespaceID, workflowID, archetypeID),
-		"shard_id": shardID,
-		"run_id":   previousRunID,
+		"_id":            currentExecutionDocID(namespaceID, workflowID, archetypeID),
+		"shard_id":       shardID,
+		"run_id":         previousRunID,
+		"storage_bucket": workflowStorageBucket(namespaceID, workflowID),
+		"record_kind":    "current",
 	}
 
 	set := bson.M{
@@ -1252,6 +1270,8 @@ func (s *executionStore) applyWorkflowMutation(
 		"_id":               doc.ID,
 		"shard_id":          shardID,
 		"db_record_version": oldVersion,
+		"storage_bucket":    workflowStorageBucket(mutation.NamespaceID, mutation.WorkflowID),
+		"record_kind":       "state",
 	}
 	updateSet := executionDocumentUpdateSet(doc)
 	result, err := s.executionsCol.UpdateOne(ctx, filter, bson.M{"$set": updateSet})
@@ -1262,7 +1282,7 @@ func (s *executionStore) applyWorkflowMutation(
 		return nil, &persistence.ConditionFailedError{Msg: "workflow execution update conflict"}
 	}
 
-	if err := s.insertWorkflowTasks(ctx, shardID, mutation.Tasks); err != nil {
+	if err := s.insertWorkflowTasks(ctx, shardID, mutation.NamespaceID, mutation.WorkflowID, mutation.Tasks); err != nil {
 		return nil, err
 	}
 
@@ -1365,7 +1385,7 @@ func (s *executionStore) applyUpdateWorkflowExecution(
 			return err
 		}
 		if request.NewWorkflowSnapshot != nil {
-			if err := s.insertWorkflowTasks(ctx, request.ShardID, request.NewWorkflowSnapshot.Tasks); err != nil {
+			if err := s.insertWorkflowTasks(ctx, request.ShardID, request.NewWorkflowSnapshot.NamespaceID, request.NewWorkflowSnapshot.WorkflowID, request.NewWorkflowSnapshot.Tasks); err != nil {
 				return err
 			}
 		}
@@ -1398,6 +1418,8 @@ func (s *executionStore) buildExecutionDocument(request *persistence.InternalCre
 	}
 
 	doc := &executionDocument{
+		StorageBucket:       workflowStorageBucket(snapshot.NamespaceID, snapshot.WorkflowID),
+		RecordKind:          "state",
 		ID:                  executionDocID(snapshot.NamespaceID, snapshot.WorkflowID, snapshot.RunID),
 		ShardID:             request.ShardID,
 		NamespaceID:         snapshot.NamespaceID,
@@ -1450,6 +1472,8 @@ func (s *executionStore) buildCurrentExecutionDocument(request *persistence.Inte
 		startTime = timePtrFromProto(state.StartTime)
 	}
 	return &currentExecutionDocument{
+		StorageBucket:    workflowStorageBucket(snapshot.NamespaceID, snapshot.WorkflowID),
+		RecordKind:       "current",
 		ID:               currentExecutionDocID(snapshot.NamespaceID, snapshot.WorkflowID, request.ArchetypeID),
 		ShardID:          request.ShardID,
 		NamespaceID:      snapshot.NamespaceID,
@@ -1528,6 +1552,8 @@ func (s *executionStore) updateExistingCurrentExecution(
 		"_id":                doc.ID,
 		"shard_id":           doc.ShardID,
 		"run_id":             request.PreviousRunID,
+		"storage_bucket":     workflowStorageBucket(doc.NamespaceID, doc.WorkflowID),
+		"record_kind":        "current",
 		"last_write_version": request.PreviousLastWriteVersion,
 		"state":              enumsspb.WORKFLOW_EXECUTION_STATE_COMPLETED,
 	}
@@ -1584,7 +1610,7 @@ func (s *executionStore) ensureRunIDMismatch(
 }
 
 func (s *executionStore) loadCurrentExecution(ctx context.Context, shardID int32, namespaceID, workflowID string, archetypeID chasm.ArchetypeID) (*currentExecutionDocument, error) {
-	filter := bson.M{"_id": currentExecutionDocID(namespaceID, workflowID, archetypeID), "shard_id": shardID}
+	filter := workflowRecordFilter(shardID, namespaceID, workflowID, "current", currentExecutionDocID(namespaceID, workflowID, archetypeID))
 	var doc currentExecutionDocument
 	if err := s.currentExecsCol.FindOne(ctx, filter).Decode(&doc); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -1664,11 +1690,12 @@ func (s *executionStore) ensureExecutionIndexes(ctx context.Context) error {
 			model: mongo.IndexModel{
 				Keys: bson.D{
 					{Key: "shard_id", Value: 1},
+					{Key: "storage_bucket", Value: 1},
 					{Key: "namespace_id", Value: 1},
 					{Key: "workflow_id", Value: 1},
 					{Key: "run_id", Value: 1},
 				},
-				Options: options.Index().SetName("executions_shard_namespace_workflow_run").SetUnique(true),
+				Options: options.Index().SetName("executions_shard_namespace_workflow_run").SetUnique(true).SetPartialFilterExpression(bson.M{"record_kind": "state"}),
 			},
 		},
 	}
@@ -1694,11 +1721,12 @@ func (s *executionStore) ensureCurrentExecutionIndexes(ctx context.Context) erro
 			model: mongo.IndexModel{
 				Keys: bson.D{
 					{Key: "shard_id", Value: 1},
+					{Key: "storage_bucket", Value: 1},
 					{Key: "namespace_id", Value: 1},
 					{Key: "workflow_id", Value: 1},
 					{Key: "archetype_id", Value: 1},
 				},
-				Options: options.Index().SetName("current_executions_shard_namespace_workflow_archetype").SetUnique(true),
+				Options: options.Index().SetName("current_executions_shard_namespace_workflow_archetype").SetUnique(true).SetPartialFilterExpression(bson.M{"record_kind": "current"}),
 			},
 		},
 		{
@@ -1713,9 +1741,6 @@ func (s *executionStore) ensureCurrentExecutionIndexes(ctx context.Context) erro
 			},
 		},
 	}
-
-	// Drop legacy index that didn't include archetype_id, if it exists.
-	_ = idxView.DropOne(ctx, "current_executions_namespace_workflow")
 
 	for _, spec := range indexes {
 		if _, err := idxView.CreateOne(ctx, spec.model); err != nil && !isDuplicateIndexError(err) {
@@ -1737,7 +1762,7 @@ func (s *executionStore) CreateWorkflowExecution(
 
 	fn := func(sessCtx context.Context) (interface{}, error) {
 		// Write fence: verify shard ownership before any writes
-		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID); err != nil {
+		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID, request.NewWorkflowSnapshot.NamespaceID, request.NewWorkflowSnapshot.WorkflowID); err != nil {
 			return nil, err
 		}
 
@@ -1756,7 +1781,7 @@ func (s *executionStore) CreateWorkflowExecution(
 			return nil, err
 		}
 
-		if err := s.insertWorkflowTasks(sessCtx, request.ShardID, request.NewWorkflowSnapshot.Tasks); err != nil {
+		if err := s.insertWorkflowTasks(sessCtx, request.ShardID, request.NewWorkflowSnapshot.NamespaceID, request.NewWorkflowSnapshot.WorkflowID, request.NewWorkflowSnapshot.Tasks); err != nil {
 			return nil, err
 		}
 
@@ -1798,10 +1823,14 @@ func (s *executionStore) UpdateWorkflowExecution(
 	if request == nil {
 		return serviceerror.NewInvalidArgument("UpdateWorkflowExecution request is nil")
 	}
+	identities := []workflowIdentity{{request.UpdateWorkflowMutation.NamespaceID, request.UpdateWorkflowMutation.WorkflowID}}
+	if request.NewWorkflowSnapshot != nil {
+		identities = append(identities, workflowIdentity{request.NewWorkflowSnapshot.NamespaceID, request.NewWorkflowSnapshot.WorkflowID})
+	}
 
 	_, err := s.executeTransaction(ctx, func(sessCtx context.Context) (interface{}, error) {
 		// Write fence: verify shard ownership before any writes
-		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID); err != nil {
+		if err := s.assertWorkflowBuckets(sessCtx, request.ShardID, request.RangeID, identities...); err != nil {
 			return nil, err
 		}
 
@@ -1856,10 +1885,17 @@ func (s *executionStore) ConflictResolveWorkflowExecution(
 	if request == nil {
 		return serviceerror.NewInvalidArgument("ConflictResolveWorkflowExecution request is nil")
 	}
+	identities := []workflowIdentity{{request.ResetWorkflowSnapshot.NamespaceID, request.ResetWorkflowSnapshot.WorkflowID}}
+	if request.CurrentWorkflowMutation != nil {
+		identities = append(identities, workflowIdentity{request.CurrentWorkflowMutation.NamespaceID, request.CurrentWorkflowMutation.WorkflowID})
+	}
+	if request.NewWorkflowSnapshot != nil {
+		identities = append(identities, workflowIdentity{request.NewWorkflowSnapshot.NamespaceID, request.NewWorkflowSnapshot.WorkflowID})
+	}
 
 	_, err := s.executeTransaction(ctx, func(sessCtx context.Context) (interface{}, error) {
 		// Write fence: verify shard ownership before any writes
-		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID); err != nil {
+		if err := s.assertWorkflowBuckets(sessCtx, request.ShardID, request.RangeID, identities...); err != nil {
 			return nil, err
 		}
 
@@ -1938,6 +1974,8 @@ func (s *executionStore) applyConflictResolveWorkflowExecution(
 		"_id":               resetDoc.ID,
 		"shard_id":          request.ShardID,
 		"db_record_version": existing.DBRecordVersion,
+		"storage_bucket":    workflowStorageBucket(resetSnapshot.NamespaceID, resetSnapshot.WorkflowID),
+		"record_kind":       "state",
 	}
 	updateSet := executionDocumentUpdateSet(resetDoc)
 	result, err := s.executionsCol.UpdateOne(ctx, filter, bson.M{"$set": updateSet})
@@ -1952,7 +1990,7 @@ func (s *executionStore) applyConflictResolveWorkflowExecution(
 		}
 	}
 
-	if err := s.insertWorkflowTasks(ctx, request.ShardID, resetSnapshot.Tasks); err != nil {
+	if err := s.insertWorkflowTasks(ctx, request.ShardID, resetSnapshot.NamespaceID, resetSnapshot.WorkflowID, resetSnapshot.Tasks); err != nil {
 		return err
 	}
 
@@ -2031,7 +2069,7 @@ func (s *executionStore) applyConflictResolveWorkflowExecution(
 			return err
 		}
 		if request.NewWorkflowSnapshot != nil {
-			if err := s.insertWorkflowTasks(ctx, request.ShardID, request.NewWorkflowSnapshot.Tasks); err != nil {
+			if err := s.insertWorkflowTasks(ctx, request.ShardID, request.NewWorkflowSnapshot.NamespaceID, request.NewWorkflowSnapshot.WorkflowID, request.NewWorkflowSnapshot.Tasks); err != nil {
 				return err
 			}
 		}
@@ -2048,7 +2086,7 @@ func (s *executionStore) DeleteWorkflowExecution(
 		return serviceerror.NewInvalidArgument("DeleteWorkflowExecution request is nil")
 	}
 
-	filter := bson.M{"_id": executionDocID(request.NamespaceID, request.WorkflowID, request.RunID), "shard_id": request.ShardID}
+	filter := workflowRecordFilter(request.ShardID, request.NamespaceID, request.WorkflowID, "state", executionDocID(request.NamespaceID, request.WorkflowID, request.RunID))
 	_, err := s.executionsCol.DeleteOne(ctx, filter)
 	if err != nil {
 		return serviceerror.NewUnavailablef("failed to delete execution document: %v", err)
@@ -2065,9 +2103,11 @@ func (s *executionStore) DeleteCurrentWorkflowExecution(
 	}
 
 	filter := bson.M{
-		"_id":      currentExecutionDocID(request.NamespaceID, request.WorkflowID, request.ArchetypeID),
-		"shard_id": request.ShardID,
-		"run_id":   request.RunID,
+		"_id":            currentExecutionDocID(request.NamespaceID, request.WorkflowID, request.ArchetypeID),
+		"shard_id":       request.ShardID,
+		"run_id":         request.RunID,
+		"storage_bucket": workflowStorageBucket(request.NamespaceID, request.WorkflowID),
+		"record_kind":    "current",
 	}
 	_, err := s.currentExecsCol.DeleteOne(ctx, filter)
 	if err != nil {
@@ -2152,7 +2192,7 @@ func (s *executionStore) SetWorkflowExecution(
 
 	_, err = s.executeTransaction(ctx, func(sessCtx context.Context) (interface{}, error) {
 		// Write fence: verify shard ownership before any writes
-		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID); err != nil {
+		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID, snapshot.NamespaceID, snapshot.WorkflowID); err != nil {
 			return nil, err
 		}
 
@@ -2188,6 +2228,8 @@ func (s *executionStore) SetWorkflowExecution(
 			"_id":               newDoc.ID,
 			"shard_id":          request.ShardID,
 			"db_record_version": existing.DBRecordVersion,
+			"storage_bucket":    workflowStorageBucket(snapshot.NamespaceID, snapshot.WorkflowID),
+			"record_kind":       "state",
 		}
 		update := bson.M{"$set": executionDocumentUpdateSet(newDoc)}
 		result, err := s.executionsCol.UpdateOne(sessCtx, filter, update)
@@ -2198,7 +2240,7 @@ func (s *executionStore) SetWorkflowExecution(
 			return nil, &persistence.ConditionFailedError{Msg: "workflow execution set conflict"}
 		}
 
-		if err := s.insertWorkflowTasks(sessCtx, request.ShardID, snapshot.Tasks); err != nil {
+		if err := s.insertWorkflowTasks(sessCtx, request.ShardID, snapshot.NamespaceID, snapshot.WorkflowID, snapshot.Tasks); err != nil {
 			return nil, err
 		}
 
@@ -2221,7 +2263,7 @@ func (s *executionStore) ListConcreteExecutions(
 		pageSize = 100
 	}
 
-	filter := bson.M{"shard_id": request.ShardID}
+	filter := bson.M{"shard_id": request.ShardID, "record_kind": "state"}
 	if len(request.PageToken) > 0 {
 		lastID, err := decodeListExecutionsToken(request.PageToken)
 		if err != nil {
@@ -2296,10 +2338,10 @@ func (s *executionStore) AddHistoryTasks(
 	}
 
 	_, err := s.executeTransaction(ctx, func(sessCtx context.Context) (interface{}, error) {
-		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID); err != nil {
+		if err := s.assertShardRangeID(sessCtx, request.ShardID, request.RangeID, request.NamespaceID, request.WorkflowID); err != nil {
 			return nil, err
 		}
-		return nil, s.insertWorkflowTasks(sessCtx, request.ShardID, request.Tasks)
+		return nil, s.insertWorkflowTasks(sessCtx, request.ShardID, request.NamespaceID, request.WorkflowID, request.Tasks)
 	})
 	return err
 }
@@ -2397,7 +2439,7 @@ func (s *executionStore) CompleteHistoryTask(
 		return serviceerror.NewInternalf("unknown task category type: %v", categoryType)
 	}
 
-	filter := bson.M{"_id": docID, "shard_id": request.ShardID}
+	filter := bson.M{"_id": docID, "shard_id": request.ShardID, "record_kind": "task", "category_id": categoryID}
 	if _, err := col.DeleteOne(ctx, filter); err != nil {
 		return serviceerror.NewUnavailablef("failed to delete history task: %v", err)
 	}
@@ -2420,6 +2462,7 @@ func (s *executionStore) RangeCompleteHistoryTasks(
 	filter := bson.M{
 		"shard_id":    request.ShardID,
 		"category_id": categoryID,
+		"record_kind": "task",
 	}
 
 	idCond := bson.M{}
@@ -2731,7 +2774,7 @@ func (s *executionStore) appendHistoryNodes(
 			},
 		}
 		opts := options.Update().SetUpsert(true)
-		if _, err := s.historyBranchesCol.UpdateOne(ctx, bson.M{"_id": branchDoc.ID, "shard_id": request.ShardID}, update, opts); err != nil {
+		if _, err := s.historyBranchesCol.UpdateOne(ctx, bson.M{"_id": branchDoc.ID, "tree_id": treeID, "shard_id": request.ShardID}, update, opts); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				return &persistence.AppendHistoryTimeoutError{Msg: err.Error()}
 			}
@@ -2759,7 +2802,7 @@ func (s *executionStore) DeleteHistoryNodes(
 
 	treeID := branchInfo.GetTreeId()
 	branchID := branchInfo.GetBranchId()
-	filter := bson.M{"_id": historyNodeDocID(treeID, branchID, request.NodeID, request.TransactionID), "shard_id": request.ShardID}
+	filter := bson.M{"_id": historyNodeDocID(treeID, branchID, request.NodeID, request.TransactionID), "tree_id": treeID, "shard_id": request.ShardID}
 
 	if _, err := s.historyNodesCol.DeleteOne(ctx, filter); err != nil {
 		return serviceerror.NewUnavailablef("failed to delete history node: %v", err)
@@ -2907,7 +2950,7 @@ func (s *executionStore) ForkHistoryBranch(
 			"tree_info": branchDoc.TreeInfo,
 		},
 	}
-	if _, err := s.historyBranchesCol.UpdateOne(ctx, bson.M{"_id": branchDoc.ID, "shard_id": request.ShardID}, update, options.Update().SetUpsert(true)); err != nil {
+	if _, err := s.historyBranchesCol.UpdateOne(ctx, bson.M{"_id": branchDoc.ID, "tree_id": base.GetTreeId(), "shard_id": request.ShardID}, update, options.Update().SetUpsert(true)); err != nil {
 		return serviceerror.NewUnavailablef("failed to upsert history branch: %v", err)
 	}
 	return nil
@@ -2925,7 +2968,7 @@ func (s *executionStore) DeleteHistoryBranch(
 	}
 
 	branchInfo := request.BranchInfo
-	filter := bson.M{"_id": historyBranchDocID(branchInfo.GetTreeId(), branchInfo.GetBranchId()), "shard_id": request.ShardID}
+	filter := bson.M{"_id": historyBranchDocID(branchInfo.GetTreeId(), branchInfo.GetBranchId()), "tree_id": branchInfo.GetTreeId(), "shard_id": request.ShardID}
 	if _, err := s.historyBranchesCol.DeleteOne(ctx, filter); err != nil {
 		return serviceerror.NewUnavailablef("failed to delete history branch: %v", err)
 	}
@@ -3086,33 +3129,13 @@ func (s *executionStore) notImplemented(method string) error {
 	return serviceerror.NewUnimplemented(fmt.Sprintf("MongoDB ExecutionStore: %s not implemented", method))
 }
 
-// assertShardRangeID verifies shard ownership and takes a write lock on the shard document.
+// assertShardRangeID verifies shard ownership and takes a write lock on the workflow bucket.
 // Must be called within the workflow transaction so ownership changes conflict with its writes.
 func (s *executionStore) assertShardRangeID(
 	ctx context.Context,
 	shardID int32,
 	expectedRangeID int64,
+	namespaceID, workflowID string,
 ) error {
-	collection := s.db.Collection(collectionShards)
-
-	result, err := collection.UpdateOne(
-		ctx,
-		bson.M{"_id": shardID, "range_id": expectedRangeID},
-		bson.M{"$set": bson.M{"transaction_lock_id": uuid.NewString()}},
-	)
-	if err != nil {
-		return newMongoUnavailableErrorf(err, "failed to lock shard document: %v", err)
-	}
-
-	if result.MatchedCount == 0 {
-		return &persistence.ShardOwnershipLostError{
-			ShardID: shardID,
-			Msg: fmt.Sprintf(
-				"Shard ownership lost. Expected RangeID: %v",
-				expectedRangeID,
-			),
-		}
-	}
-
-	return nil
+	return s.assertWorkflowBuckets(ctx, shardID, expectedRangeID, workflowIdentity{namespaceID, workflowID})
 }

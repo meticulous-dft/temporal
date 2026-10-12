@@ -150,6 +150,9 @@ func validateMongoTopology(topologyType client.TopologyType) error {
 }
 
 func validateMongoSchemaTopology(topologyType client.TopologyType, version schemaVersionDocument) error {
+	if version.StorageModelVersion != mongodbschema.StorageModelVersion || version.StorageBucketCount != mongodbschema.StorageBucketCount {
+		return fmt.Errorf("MongoDB requires storage model %q with %d buckets; found %q with %d buckets", mongodbschema.StorageModelVersion, mongodbschema.StorageBucketCount, version.StorageModelVersion, version.StorageBucketCount)
+	}
 	switch topologyType {
 	case client.TopologyReplicaSet:
 		if version.Topology != "" && version.Topology != mongodbschema.TopologyReplicaSet {
@@ -332,6 +335,7 @@ func (f *Factory) NewShardStore() (p.ShardStore, error) {
 
 	shardStore, err := NewShardStore(
 		f.database,
+		f.client,
 		f.cfg,
 		f.logger,
 		f.clusterName,

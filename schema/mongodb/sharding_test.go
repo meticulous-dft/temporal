@@ -10,17 +10,11 @@ import (
 func TestShardedCollections(t *testing.T) {
 	want := map[string]bson.D{
 		"shards":                {{Key: "_id", Value: 1}},
-		"executions":            {{Key: "shard_id", Value: 1}},
-		"current_executions":    {{Key: "shard_id", Value: 1}},
-		"history_branches":      {{Key: "shard_id", Value: 1}},
-		"history_nodes":         {{Key: "shard_id", Value: 1}},
-		"transfer_tasks":        {{Key: "shard_id", Value: 1}},
-		"timer_tasks":           {{Key: "shard_id", Value: 1}},
-		"replication_tasks":     {{Key: "shard_id", Value: 1}},
-		"visibility_tasks":      {{Key: "shard_id", Value: 1}},
+		"history_records":       {{Key: "shard_id", Value: 1}, {Key: "storage_bucket", Value: 1}},
+		"history_branches":      {{Key: "tree_id", Value: 1}},
+		"history_nodes":         {{Key: "tree_id", Value: 1}},
 		"replication_dlq_tasks": {{Key: "shard_id", Value: 1}},
-		"task_queues":           matchingShardKey(),
-		"tasks":                 matchingShardKey(),
+		"matching_records":      {{Key: "namespace_id", Value: 1}, {Key: "task_queue", Value: 1}, {Key: "task_type", Value: 1}},
 		"visibility": {
 			{Key: "NamespaceId", Value: 1},
 			{Key: "RunId", Value: "hashed"},

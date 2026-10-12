@@ -90,17 +90,21 @@ func TestValidateMongoSchemaTopology(t *testing.T) {
 		version      schemaVersionDocument
 		wantError    string
 	}{
-		{name: "legacy replica set", topologyType: client.TopologyReplicaSet},
+		{name: "unstamped replica set", topologyType: client.TopologyReplicaSet, wantError: "requires storage model"},
 		{name: "stamped replica set", topologyType: client.TopologyReplicaSet, version: schemaVersionDocument{Topology: "replica_set"}},
-		{name: "sharded exact plan", topologyType: client.TopologySharded, version: schemaVersionDocument{Topology: "sharded", ShardingPlanVersion: "2"}},
+		{name: "sharded exact plan", topologyType: client.TopologySharded, version: schemaVersionDocument{Topology: "sharded", ShardingPlanVersion: "5"}},
 		{name: "sharded missing topology", topologyType: client.TopologySharded, wantError: `requires schema topology "sharded"`},
-		{name: "sharded missing plan", topologyType: client.TopologySharded, version: schemaVersionDocument{Topology: "sharded"}, wantError: `requires sharding plan version "2"`},
-		{name: "sharded wrong plan", topologyType: client.TopologySharded, version: schemaVersionDocument{Topology: "sharded", ShardingPlanVersion: "1"}, wantError: `requires sharding plan version "2"`},
+		{name: "sharded missing plan", topologyType: client.TopologySharded, version: schemaVersionDocument{Topology: "sharded"}, wantError: `requires sharding plan version "5"`},
+		{name: "sharded wrong plan", topologyType: client.TopologySharded, version: schemaVersionDocument{Topology: "sharded", ShardingPlanVersion: "4"}, wantError: `requires sharding plan version "5"`},
 		{name: "replica set with sharded metadata", topologyType: client.TopologyReplicaSet, version: schemaVersionDocument{Topology: "sharded", ShardingPlanVersion: "1"}, wantError: "does not match replica set deployment"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if test.name != "unstamped replica set" {
+				test.version.StorageModelVersion = "bucketed_atomic_v1"
+				test.version.StorageBucketCount = 64
+			}
 			err := validateMongoSchemaTopology(test.topologyType, test.version)
 			if test.wantError == "" {
 				require.NoError(t, err)
@@ -108,6 +112,17 @@ func TestValidateMongoSchemaTopology(t *testing.T) {
 				require.ErrorContains(t, err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestValidateMongoSchemaRejectsIncompatibleBucketModel(t *testing.T) {
+	for _, topology := range []client.TopologyType{client.TopologyReplicaSet, client.TopologySharded} {
+		for _, metadata := range []schemaVersionDocument{
+			{StorageModelVersion: "bucketed_atomic_v1", StorageBucketCount: 63},
+			{StorageModelVersion: "unknown", StorageBucketCount: 64},
+		} {
+			require.ErrorContains(t, validateMongoSchemaTopology(topology, metadata), "requires storage model")
+		}
 	}
 }
 

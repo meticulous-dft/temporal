@@ -28,11 +28,11 @@ func TestShardingInstallerInstallsAndCommitsPlan(t *testing.T) {
 func TestShardingInstallerRejectsPopulatedUnplannedCollection(t *testing.T) {
 	database := &fakeShardingDatabase{
 		topology: mongodbschema.TopologySharded,
-		counts:   map[string]int64{"executions": 1},
+		counts:   map[string]int64{"history_records": 1},
 	}
 
 	err := NewShardingInstaller(database).Run(context.Background())
-	require.ErrorContains(t, err, `collection "executions" contains 1 documents`)
+	require.ErrorContains(t, err, `collection "history_records" contains 1 documents`)
 	require.Empty(t, database.committedTopology)
 }
 
@@ -40,12 +40,12 @@ func TestShardingInstallerRejectsWrongInstalledKey(t *testing.T) {
 	database := &fakeShardingDatabase{
 		topology: mongodbschema.TopologySharded,
 		installed: map[string]collectionSharding{
-			"executions": {Sharded: true, ShardKey: bson.D{{Key: "namespace_id", Value: 1}}},
+			"history_records": {Sharded: true, ShardKey: bson.D{{Key: "namespace_id", Value: 1}}},
 		},
 	}
 
 	err := NewShardingInstaller(database).Run(context.Background())
-	require.ErrorContains(t, err, `collection "executions" has shard key`)
+	require.ErrorContains(t, err, `collection "history_records" has shard key`)
 	require.Empty(t, database.committedTopology)
 }
 
@@ -89,6 +89,18 @@ func TestShardingInstallerStampsReplicaSetWithoutShardingCollections(t *testing.
 	require.Empty(t, database.committedPlan)
 }
 
+func TestShardingInstallerRejectsIncompatibleStorageBeforeSharding(t *testing.T) {
+	for _, topology := range []string{mongodbschema.TopologyReplicaSet, mongodbschema.TopologySharded} {
+		t.Run(topology, func(t *testing.T) {
+			failure := errors.New("populated incompatible storage model")
+			database := &fakeShardingDatabase{topology: topology, storageModelError: failure}
+			require.ErrorIs(t, NewShardingInstaller(database).Run(context.Background()), failure)
+			require.Empty(t, database.sharded)
+			require.Empty(t, database.committedTopology)
+		})
+	}
+}
+
 type fakeShardingDatabase struct {
 	topology          string
 	installed         map[string]collectionSharding
@@ -97,6 +109,11 @@ type fakeShardingDatabase struct {
 	sharded           []mongodbschema.ShardedCollection
 	committedTopology string
 	committedPlan     string
+	storageModelError error
+}
+
+func (d *fakeShardingDatabase) ValidateStorageModel(context.Context) error {
+	return d.storageModelError
 }
 
 func (d *fakeShardingDatabase) Topology(context.Context) (string, error) {

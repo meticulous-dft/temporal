@@ -2,7 +2,7 @@ package mongodb
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/mongodb/client"
+	mongodbschema "go.temporal.io/server/schema/mongodb"
 )
 
 const (
@@ -20,6 +21,7 @@ const (
 
 type (
 	shardStore struct {
+		transactionalStore
 		db                  client.Database
 		cfg                 config.MongoDB
 		logger              log.Logger
@@ -28,23 +30,33 @@ type (
 	}
 
 	shardDocument struct {
-		ShardID           int32  `bson:"_id"`
-		RangeID           int64  `bson:"range_id"`
-		Data              []byte `bson:"data"`
-		DataEncoding      string `bson:"data_encoding"`
-		TransactionLockID string `bson:"transaction_lock_id,omitempty"`
+		ShardID             int32  `bson:"_id"`
+		RangeID             int64  `bson:"range_id"`
+		Data                []byte `bson:"data"`
+		DataEncoding        string `bson:"data_encoding"`
+		TransactionLockID   string `bson:"transaction_lock_id,omitempty"`
+		StorageBucketCount  int32  `bson:"storage_bucket_count"`
+		StorageModelVersion string `bson:"storage_model_version"`
 	}
 )
 
 // NewShardStore creates a new instance of MongoDB-based ShardStore
 func NewShardStore(
 	db client.Database,
+	mongoClient client.Client,
 	cfg config.MongoDB,
 	logger log.Logger,
 	clusterName string,
 	transactionsEnabled bool,
 ) (persistence.ShardStore, error) {
+	if !transactionsEnabled {
+		return nil, errors.New("mongodb shard store requires transactions-enabled topology")
+	}
+	if mongoClient == nil {
+		return nil, errors.New("mongodb shard store requires client with session support")
+	}
 	return &shardStore{
+		transactionalStore:  newTransactionalStore(mongoClient),
 		db:                  db,
 		cfg:                 cfg,
 		logger:              logger,
@@ -77,6 +89,15 @@ func (s *shardStore) GetOrCreateShard(
 	err := collection.FindOne(ctx, filter).Decode(&doc)
 
 	if err == nil {
+		_, err = s.executeTransaction(ctx, func(txCtx context.Context) (interface{}, error) {
+			if err := collection.FindOne(txCtx, filter).Decode(&doc); err != nil {
+				return nil, newMongoUnavailableErrorf(err, "failed to read shard owner: %v", err)
+			}
+			return nil, validateBucketFences(txCtx, s.db, doc)
+		})
+		if err != nil {
+			return nil, err
+		}
 		// Shard exists, return it
 		return &persistence.InternalGetOrCreateShardResponse{
 			ShardInfo: persistence.NewDataBlob(doc.Data, doc.DataEncoding),
@@ -111,13 +132,21 @@ func (s *shardStore) GetOrCreateShard(
 	}
 
 	newDoc := shardDocument{
-		ShardID:      request.ShardID,
-		RangeID:      rangeID,
-		Data:         shardInfo.Data,
-		DataEncoding: shardInfo.EncodingType.String(),
+		ShardID:             request.ShardID,
+		RangeID:             rangeID,
+		Data:                shardInfo.Data,
+		DataEncoding:        shardInfo.EncodingType.String(),
+		StorageBucketCount:  mongodbschema.StorageBucketCount,
+		StorageModelVersion: mongodbschema.StorageModelVersion,
 	}
 
-	_, err = collection.InsertOne(ctx, newDoc)
+	_, err = s.executeTransaction(ctx, func(txCtx context.Context) (interface{}, error) {
+		if _, err := collection.InsertOne(txCtx, newDoc); err != nil {
+			return nil, err
+		}
+		_, err := s.db.Collection(collectionHistoryRecords).InsertMany(txCtx, initialBucketFences(request.ShardID, rangeID))
+		return nil, err
+	})
 	if err == nil {
 		s.logger.Info("Created new shard",
 			tag.ShardID(request.ShardID),
@@ -132,8 +161,9 @@ func (s *shardStore) GetOrCreateShard(
 	if mongo.IsDuplicateKeyError(err) {
 		// Race condition: another process created the shard
 		// Retry without creating
-		request.CreateShardInfo = nil
-		return s.GetOrCreateShard(ctx, request)
+		readRequest := *request
+		readRequest.CreateShardInfo = nil
+		return s.GetOrCreateShard(ctx, &readRequest)
 	}
 
 	return nil, serviceerror.NewUnavailablef(
@@ -151,8 +181,10 @@ func (s *shardStore) UpdateShard(
 
 	// Optimistic concurrency control: update only if PreviousRangeID matches
 	filter := bson.M{
-		"_id":      request.ShardID,
-		"range_id": request.PreviousRangeID,
+		"_id":                   request.ShardID,
+		"range_id":              request.PreviousRangeID,
+		"storage_bucket_count":  mongodbschema.StorageBucketCount,
+		"storage_model_version": mongodbschema.StorageModelVersion,
 	}
 
 	update := bson.M{
@@ -163,25 +195,28 @@ func (s *shardStore) UpdateShard(
 		},
 	}
 
-	result, err := collection.UpdateOne(ctx, filter, update)
-	if err != nil {
-		return serviceerror.NewUnavailablef(
-			"UpdateShard: failed to update ShardID %v. Error: %v",
-			request.ShardID,
-			err,
+	_, err := s.executeTransaction(ctx, func(txCtx context.Context) (interface{}, error) {
+		fences, err := s.db.Collection(collectionHistoryRecords).UpdateMany(txCtx,
+			bucketFencesFilter(request.ShardID, request.PreviousRangeID),
+			bson.M{"$set": bson.M{"range_id": request.RangeID}},
 		)
-	}
-
-	if result.MatchedCount == 0 {
-		// No document matched, meaning PreviousRangeID didn't match
-		return &persistence.ShardOwnershipLostError{
-			ShardID: request.ShardID,
-			Msg: fmt.Sprintf(
-				"UpdateShard: failed to update shard %v. Previous range ID mismatch (expected %v, current is different)",
-				request.ShardID,
-				request.PreviousRangeID,
-			),
+		if err != nil {
+			return nil, newMongoUnavailableErrorf(err, "failed to update bucket fences: %v", err)
 		}
+		if fences.MatchedCount != mongodbschema.StorageBucketCount {
+			return nil, &persistence.ShardOwnershipLostError{ShardID: request.ShardID, Msg: "incomplete or stale bucket fences"}
+		}
+		result, err := collection.UpdateOne(txCtx, filter, update)
+		if err != nil {
+			return nil, newMongoUnavailableErrorf(err, "failed to update shard owner: %v", err)
+		}
+		if result.MatchedCount != 1 {
+			return nil, &persistence.ShardOwnershipLostError{ShardID: request.ShardID, Msg: "previous range ID or storage model mismatch"}
+		}
+		return nil, nil
+	})
+	if err != nil {
+		return err
 	}
 
 	s.logger.Debug("Updated shard",

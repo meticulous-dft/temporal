@@ -103,7 +103,7 @@ func TestTaskStoreRejectsStaleTaskQueueOwner(t *testing.T) {
 	var conditionFailed *persistence.ConditionFailedError
 	require.ErrorAs(t, err, &conditionFailed)
 
-	count, err := factory.database.Collection(collectionTasks).CountDocuments(ctx, bson.M{})
+	count, err := factory.database.Collection(collectionTasks).CountDocuments(ctx, bson.M{"record_kind": "task"})
 	require.NoError(t, err)
 	require.Zero(t, count, "stale owner inserted a task")
 
