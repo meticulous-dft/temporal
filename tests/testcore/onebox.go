@@ -263,14 +263,10 @@ func (c *TemporalImpl) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	slices.Reverse(c.fxApps) // less log spam if we go backwards
 	var errs []error
-	// Restarted apps are appended later, but workers must stop before their service dependencies.
-	for _, service := range []primitives.ServiceName{
-		primitives.WorkerService, primitives.FrontendService, primitives.HistoryService, primitives.MatchingService,
-	} {
-		for _, app := range slices.Backward(c.serviceApps[service]) {
-			errs = append(errs, app.Stop(ctx))
-		}
+	for _, app := range c.fxApps {
+		errs = append(errs, app.Stop(ctx))
 	}
 
 	return multierr.Combine(errs...)

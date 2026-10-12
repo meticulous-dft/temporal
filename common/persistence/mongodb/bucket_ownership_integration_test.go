@@ -78,12 +78,21 @@ func TestBucketOwnershipRealStores(t *testing.T) {
 				heldStore.db = &bucketOwnerFaultDatabase{Database: factory.database, collection: collectionHistoryRecords, pause: pause}
 				done := make(chan error, 1)
 				go func() { done <- heldStore.AddHistoryTasks(ctx, bucketTaskRequest("workflow-0", 100, 1)) }()
-				waitModelPause(ctx, t, pause)
+				select {
+				case <-pause.reached:
+				case <-ctx.Done():
+					t.Fatal("timed out waiting for the held bucket write")
+				}
 				progressCtx, progressCancel := context.WithTimeout(ctx, 10*time.Second)
 				err = executions.AddHistoryTasks(progressCtx, bucketTaskRequest("wf", 100, 2))
 				progressCancel()
 				pause.release()
-				require.NoError(t, waitModelResult(ctx, t, done))
+				select {
+				case heldErr := <-done:
+					require.NoError(t, heldErr)
+				case <-ctx.Done():
+					t.Fatal("timed out waiting for the held bucket write to complete")
+				}
 				require.NoError(t, err, "another workflow bucket must commit while the first bucket is locked")
 				count, err := factory.database.Collection(collectionHistoryRecords).CountDocuments(ctx, bson.M{"shard_id": int32(17), "record_kind": "task"})
 				require.NoError(t, err)

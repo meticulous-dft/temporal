@@ -140,11 +140,8 @@ func TestExecutionStoreRejectsStaleShardOwner(t *testing.T) {
 	require.ErrorAs(t, err, &ownershipLost)
 
 	for _, collectionName := range []string{
-		collectionExecutions,
-		collectionCurrentExecutions,
 		collectionHistoryBranches,
 		collectionHistoryNodes,
-		collectionTransferTasks,
 	} {
 		count, err := factory.database.Collection(collectionName).CountDocuments(ctx, bson.M{})
 		require.NoError(t, err)

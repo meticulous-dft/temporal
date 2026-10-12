@@ -3,10 +3,8 @@ set -euo pipefail
 
 readonly username="${MONGO_INITDB_ROOT_USERNAME}"
 readonly password="${MONGO_INITDB_ROOT_PASSWORD}"
-readonly data_dir="${MONGO_QUALIFICATION_DATA_DIR:-/data}"
-readonly keyfile="${data_dir}/configdb/mongo-keyfile"
+readonly keyfile="/data/configdb/mongo-keyfile"
 
-mkdir -p "${data_dir}/configdb"
 printf '%s' "${MONGO_REPLICA_SET_KEY}" >"${keyfile}"
 chmod 400 "${keyfile}"
 
@@ -16,7 +14,7 @@ start_mongod() {
   local replica_set="$1"
   local port="$2"
   local role="$3"
-  local dbpath="${data_dir}/${replica_set}-${port}"
+  local dbpath="/data/${replica_set}-${port}"
   mkdir -p "${dbpath}"
 
   role_args=()
@@ -43,7 +41,7 @@ start_mongod() {
 
 start_mongos() {
   local port="$1"
-  local dbpath="${data_dir}/mongos-${port}"
+  local dbpath="/data/mongos-${port}"
   mkdir -p "${dbpath}"
   mongos \
     --configdb config-rs/localhost:27101,localhost:27102,localhost:27103 \
@@ -98,20 +96,6 @@ init_replica_set() {
   "
 }
 
-shutdown() {
-  for port in 27017 27018; do
-    pidfile="${data_dir}/mongos-${port}/mongos.pid"
-    if [[ -f "${pidfile}" ]]; then
-      kill "$(cat "${pidfile}")" 2>/dev/null || true
-    fi
-  done
-  for pid in "${mongod_pids[@]}"; do
-    kill "${pid}" 2>/dev/null || true
-  done
-  wait || true
-}
-trap shutdown TERM INT EXIT
-
 start_mongod config-rs 27101 config
 start_mongod config-rs 27102 config
 start_mongod config-rs 27103 config
@@ -147,12 +131,26 @@ mongosh --quiet "${mongo_uri}" --eval "
   }
 "
 
+shutdown() {
+  for port in 27017 27018; do
+    pidfile="/data/mongos-${port}/mongos.pid"
+    if [[ -f "${pidfile}" ]]; then
+      kill "$(cat "${pidfile}")" 2>/dev/null || true
+    fi
+  done
+  for pid in "${mongod_pids[@]}"; do
+    kill "${pid}" 2>/dev/null || true
+  done
+  wait || true
+}
+trap shutdown TERM INT EXIT
+
 while true; do
   for pid in "${mongod_pids[@]}"; do
     kill -0 "${pid}"
   done
   for port in 27017 27018; do
-    pidfile="${data_dir}/mongos-${port}/mongos.pid"
+    pidfile="/data/mongos-${port}/mongos.pid"
     if [[ ! -f "${pidfile}" ]] || ! kill -0 "$(cat "${pidfile}")" 2>/dev/null; then
       start_mongos "${port}"
     fi

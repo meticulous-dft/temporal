@@ -1709,6 +1709,8 @@ func (s *executionStore) ensureExecutionIndexes(ctx context.Context) error {
 	return nil
 }
 
+// ensureCurrentExecutionIndexes creates uniqueness only for current-pointer records
+// in the shared History collection; tasks and fences do not need a second index.
 func (s *executionStore) ensureCurrentExecutionIndexes(ctx context.Context) error {
 	idxView := s.currentExecsCol.Indexes()
 
@@ -1727,17 +1729,6 @@ func (s *executionStore) ensureCurrentExecutionIndexes(ctx context.Context) erro
 					{Key: "archetype_id", Value: 1},
 				},
 				Options: options.Index().SetName("current_executions_shard_namespace_workflow_archetype").SetUnique(true).SetPartialFilterExpression(bson.M{"record_kind": "current"}),
-			},
-		},
-		{
-			name: "current_executions_shard",
-			model: mongo.IndexModel{
-				Keys: bson.D{
-					{Key: "shard_id", Value: 1},
-					{Key: "namespace_id", Value: 1},
-					{Key: "workflow_id", Value: 1},
-				},
-				Options: options.Index().SetName("current_executions_shard"),
 			},
 		},
 	}
