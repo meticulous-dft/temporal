@@ -218,7 +218,7 @@ func configureFailpointOnAllSeeds(
 
 func requireTransactionTestTaskCount(ctx context.Context, t *testing.T, factory *Factory, expected int64) {
 	t.Helper()
-	count, err := factory.database.Collection(collectionTasks).CountDocuments(ctx, bson.M{})
+	count, err := factory.database.Collection(collectionTasks).CountDocuments(ctx, bson.M{"record_kind": "task"})
 	require.NoError(t, err)
 	require.Equal(t, expected, count)
 }

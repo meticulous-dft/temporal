@@ -17,6 +17,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
@@ -58,7 +59,7 @@ func TestShardedSchemaContractAndRestart(t *testing.T) {
 	)
 	require.NoError(t, err)
 	_, err = NewFactory(cfg, "test-cluster", log.NewTestLogger(), metrics.NoopMetricsHandler)
-	require.ErrorContains(t, err, `requires sharding plan version "1"`)
+	require.ErrorContains(t, err, `requires sharding plan version "5"`)
 
 	_, err = factory.database.Collection(mongodbschema.SchemaVersionCollection).UpdateOne(
 		ctx,
@@ -78,17 +79,17 @@ func TestShardedHotPathQueriesTargetOneShard(t *testing.T) {
 	requireShardedTopology(t, factory)
 
 	require.NoError(t, runAdminCommand(ctx, factory, bson.D{
-		{Key: "split", Value: cfg.DatabaseName + ".executions"},
-		{Key: "middle", Value: bson.D{{Key: "shard_id", Value: int32(0)}}},
+		{Key: "split", Value: cfg.DatabaseName + ".history_records"},
+		{Key: "middle", Value: bson.D{{Key: "shard_id", Value: int32(0)}, {Key: "storage_bucket", Value: primitive.MinKey{}}}},
 	}))
 	require.NoError(t, runAdminCommand(ctx, factory, bson.D{
-		{Key: "moveChunk", Value: cfg.DatabaseName + ".executions"},
-		{Key: "find", Value: bson.D{{Key: "shard_id", Value: int32(-1)}}},
+		{Key: "moveChunk", Value: cfg.DatabaseName + ".history_records"},
+		{Key: "find", Value: bson.D{{Key: "shard_id", Value: int32(-1)}, {Key: "storage_bucket", Value: int32(0)}}},
 		{Key: "to", Value: "shard-rs-0"},
 	}))
 	require.NoError(t, runAdminCommand(ctx, factory, bson.D{
-		{Key: "moveChunk", Value: cfg.DatabaseName + ".executions"},
-		{Key: "find", Value: bson.D{{Key: "shard_id", Value: int32(1)}}},
+		{Key: "moveChunk", Value: cfg.DatabaseName + ".history_records"},
+		{Key: "find", Value: bson.D{{Key: "shard_id", Value: int32(1)}, {Key: "storage_bucket", Value: int32(0)}}},
 		{Key: "to", Value: "shard-rs-1"},
 	}))
 
@@ -96,27 +97,131 @@ func TestShardedHotPathQueriesTargetOneShard(t *testing.T) {
 		{Key: "namespace_id", Value: "m"},
 		{Key: "task_queue", Value: primitive.MinKey{}},
 		{Key: "task_type", Value: primitive.MinKey{}},
-		{Key: "subqueue", Value: primitive.MinKey{}},
 	}
 	require.NoError(t, runAdminCommand(ctx, factory, bson.D{
-		{Key: "split", Value: cfg.DatabaseName + ".tasks"},
+		{Key: "split", Value: cfg.DatabaseName + ".matching_records"},
 		{Key: "middle", Value: matchingBoundary},
 	}))
 	require.NoError(t, runAdminCommand(ctx, factory, bson.D{
-		{Key: "moveChunk", Value: cfg.DatabaseName + ".tasks"},
+		{Key: "moveChunk", Value: cfg.DatabaseName + ".matching_records"},
 		{Key: "find", Value: matchingRoute("a", "queue")},
 		{Key: "to", Value: "shard-rs-0"},
 	}))
 	require.NoError(t, runAdminCommand(ctx, factory, bson.D{
-		{Key: "moveChunk", Value: cfg.DatabaseName + ".tasks"},
+		{Key: "moveChunk", Value: cfg.DatabaseName + ".matching_records"},
 		{Key: "find", Value: matchingRoute("z", "queue")},
 		{Key: "to", Value: "shard-rs-1"},
 	}))
 
-	require.Equal(t, 1, explainShardCount(ctx, t, factory, collectionExecutions, bson.D{{Key: "shard_id", Value: int32(1)}}))
-	require.Equal(t, 2, explainShardCount(ctx, t, factory, collectionExecutions, bson.D{{Key: "namespace_id", Value: "missing-route"}}))
+	require.Equal(t, 1, explainShardCount(ctx, t, factory, collectionHistoryRecords, bson.D{{Key: "shard_id", Value: int32(1)}, {Key: "storage_bucket", Value: int32(0)}}))
+	require.Equal(t, 2, explainShardCount(ctx, t, factory, collectionHistoryRecords, bson.D{{Key: "namespace_id", Value: "missing-route"}}))
 	require.Equal(t, 1, explainShardCount(ctx, t, factory, collectionTasks, matchingRoute("z", "queue")))
 	require.Equal(t, 2, explainShardCount(ctx, t, factory, collectionTasks, bson.D{{Key: "task_queue", Value: "queue"}}))
+}
+
+func TestShardedHistoryTreesDistributeWithinOneHistoryShard(t *testing.T) {
+	factory, cfg := newFencingTestFactory(t, "history_tree_distribution")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	t.Cleanup(cancel)
+	requireShardedTopology(t, factory)
+
+	const (
+		shardID  = int32(17)
+		lowTree  = "10000000-0000-4000-8000-000000000001"
+		highTree = "f0000000-0000-4000-8000-000000000002"
+		boundary = "80000000-0000-4000-8000-000000000000"
+		branchID = "00000000-0000-4000-8000-000000000003"
+	)
+	for _, collection := range []string{collectionHistoryNodes, collectionHistoryBranches} {
+		require.NoError(t, runAdminCommand(ctx, factory, bson.D{
+			{Key: "split", Value: cfg.DatabaseName + "." + collection},
+			{Key: "middle", Value: bson.D{{Key: "tree_id", Value: boundary}}},
+		}))
+		for _, placement := range []struct{ tree, shard string }{{lowTree, "shard-rs-0"}, {highTree, "shard-rs-1"}} {
+			require.NoError(t, runAdminCommand(ctx, factory, bson.D{
+				{Key: "moveChunk", Value: cfg.DatabaseName + "." + collection},
+				{Key: "find", Value: bson.D{{Key: "tree_id", Value: placement.tree}}},
+				{Key: "to", Value: placement.shard},
+			}))
+			require.Equal(t, placement.shard, explainTargetShard(ctx, t, factory, collection,
+				bson.D{{Key: "tree_id", Value: placement.tree}, {Key: "shard_id", Value: shardID}}))
+		}
+		require.Equal(t, 2, explainShardCount(ctx, t, factory, collection, bson.D{{Key: "shard_id", Value: shardID}}))
+	}
+
+	store, err := factory.NewExecutionStore()
+	require.NoError(t, err)
+	for _, tree := range []string{lowTree, highTree} {
+		branch := &persistencespb.HistoryBranch{TreeId: tree, BranchId: branchID}
+		for nodeID := int64(1); nodeID <= 2; nodeID++ {
+			require.NoError(t, store.AppendHistoryNodes(ctx, &persistence.InternalAppendHistoryNodesRequest{
+				ShardID: shardID, IsNewBranch: nodeID == 1, BranchInfo: branch,
+				TreeInfo: persistence.NewDataBlob([]byte(tree), enumspb.ENCODING_TYPE_PROTO3.String()),
+				Node: persistence.InternalHistoryNode{
+					NodeID: nodeID, TransactionID: nodeID, PrevTransactionID: nodeID - 1,
+					Events: persistence.NewDataBlob([]byte(fmt.Sprintf("%s:%d", tree, nodeID)), enumspb.ENCODING_TYPE_PROTO3.String()),
+				},
+			}))
+		}
+	}
+
+	// Move populated history without changing the Temporal shard or branch token.
+	for _, collection := range []string{collectionHistoryNodes, collectionHistoryBranches} {
+		require.NoError(t, runAdminCommand(ctx, factory, bson.D{
+			{Key: "moveChunk", Value: cfg.DatabaseName + "." + collection},
+			{Key: "find", Value: bson.D{{Key: "tree_id", Value: lowTree}}},
+			{Key: "to", Value: "shard-rs-1"},
+		}))
+		require.Equal(t, "shard-rs-1", explainTargetShard(ctx, t, factory, collection, bson.D{{Key: "tree_id", Value: lowTree}}))
+	}
+	for _, tree := range []string{lowTree, highTree} {
+		id := branchID
+		token, err := store.GetHistoryBranchUtil().NewHistoryBranch("", "", "", tree, &id, nil, 0, 0, 0)
+		require.NoError(t, err)
+		for _, reverse := range []bool{false, true} {
+			request := &persistence.InternalReadHistoryBranchRequest{
+				ShardID: shardID, BranchToken: token, MinNodeID: 1, MaxNodeID: 3,
+				PageSize: 1, ReverseOrder: reverse,
+			}
+			for _, nodeID := range []int64{1, 2} {
+				if reverse {
+					nodeID = 3 - nodeID
+				}
+				response, err := store.ReadHistoryBranch(ctx, request)
+				require.NoError(t, err)
+				require.Len(t, response.Nodes, 1)
+				require.Equal(t, nodeID, response.Nodes[0].NodeID)
+				require.Equal(t, nodeID-1, response.Nodes[0].PrevTransactionID)
+				require.Equal(t, []byte(fmt.Sprintf("%s:%d", tree, nodeID)), response.Nodes[0].Events.Data)
+				require.NotEmpty(t, response.NextPageToken)
+				request.NextPageToken = response.NextPageToken
+			}
+			response, err := store.ReadHistoryBranch(ctx, request)
+			require.NoError(t, err)
+			require.Empty(t, response.Nodes)
+			require.Empty(t, response.NextPageToken)
+		}
+	}
+}
+
+func explainTargetShard(ctx context.Context, t *testing.T, factory *Factory, collection string, filter interface{}) string {
+	t.Helper()
+	var result struct {
+		QueryPlanner struct {
+			WinningPlan struct {
+				Shards []struct {
+					ShardName string `bson:"shardName"`
+				} `bson:"shards"`
+			} `bson:"winningPlan"`
+		} `bson:"queryPlanner"`
+	}
+	require.NoError(t, factory.database.RunCommand(ctx, bson.D{
+		{Key: "explain", Value: bson.D{{Key: "find", Value: collection}, {Key: "filter", Value: filter}}},
+		{Key: "verbosity", Value: "queryPlanner"},
+	}).Decode(&result))
+	require.Len(t, result.QueryPlanner.WinningPlan.Shards, 1)
+	require.NotEmpty(t, result.QueryPlanner.WinningPlan.Shards[0].ShardName)
+	return result.QueryPlanner.WinningPlan.Shards[0].ShardName
 }
 
 func TestCreateTasksSurvivesChunkMigration(t *testing.T) {
@@ -202,7 +307,6 @@ func matchingRoute(namespaceID, taskQueue string) bson.D {
 		{Key: "namespace_id", Value: namespaceID},
 		{Key: "task_queue", Value: taskQueue},
 		{Key: "task_type", Value: int32(enumspb.TASK_QUEUE_TYPE_WORKFLOW)},
-		{Key: "subqueue", Value: persistence.SubqueueZero},
 	}
 }
 
@@ -211,7 +315,7 @@ func explainShardCount(
 	t *testing.T,
 	factory *Factory,
 	collection string,
-	filter bson.D,
+	filter interface{},
 ) int {
 	t.Helper()
 	var result bson.M
@@ -404,6 +508,7 @@ func requireShardedTaskCount(
 	count, err := factory.database.Collection(collectionTasks).CountDocuments(ctx, bson.M{
 		"namespace_id": namespaceID,
 		"task_queue":   taskQueue,
+		"record_kind":  "task",
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(expected), count)
@@ -418,7 +523,7 @@ func moveMatchingChunk(
 	destination string,
 ) error {
 	return runAdminCommand(ctx, factory, bson.D{
-		{Key: "moveChunk", Value: databaseName + ".tasks"},
+		{Key: "moveChunk", Value: databaseName + ".matching_records"},
 		{Key: "find", Value: matchingRoute(namespaceID, taskQueue)},
 		{Key: "to", Value: destination},
 		{Key: "_waitForDelete", Value: true},

@@ -76,14 +76,14 @@ func TestAssertShardRangeID(t *testing.T) {
 		shardCol.enqueueUpdateResult(&mongo.UpdateResult{MatchedCount: 1})
 		shardCol.enqueueUpdateResult(&mongo.UpdateResult{MatchedCount: 1})
 		db := newFakeMongoDatabase(t)
-		db.collections[collectionShards] = shardCol
+		db.collections[collectionHistoryRecords] = shardCol
 		store := &executionStore{db: db}
 
-		require.NoError(t, store.assertShardRangeID(context.Background(), shardID, rangeID))
-		require.NoError(t, store.assertShardRangeID(context.Background(), shardID, rangeID))
+		require.NoError(t, store.assertShardRangeID(context.Background(), shardID, rangeID, "ns", "wf"))
+		require.NoError(t, store.assertShardRangeID(context.Background(), shardID, rangeID, "ns", "wf"))
 		require.Equal(t, []interface{}{
-			bson.M{"_id": shardID, "range_id": rangeID},
-			bson.M{"_id": shardID, "range_id": rangeID},
+			bson.M{"shard_id": shardID, "storage_bucket": int32(53), "record_kind": "fence", "range_id": rangeID},
+			bson.M{"shard_id": shardID, "storage_bucket": int32(53), "record_kind": "fence", "range_id": rangeID},
 		}, shardCol.updateFilters)
 
 		lockIDs := make([]string, 0, len(shardCol.updateUpdates))
@@ -104,10 +104,10 @@ func TestAssertShardRangeID(t *testing.T) {
 		shardCol := newFakeCollection(t)
 		shardCol.enqueueUpdateResult(&mongo.UpdateResult{})
 		db := newFakeMongoDatabase(t)
-		db.collections[collectionShards] = shardCol
+		db.collections[collectionHistoryRecords] = shardCol
 		store := &executionStore{db: db}
 
-		err := store.assertShardRangeID(context.Background(), shardID, rangeID)
+		err := store.assertShardRangeID(context.Background(), shardID, rangeID, "ns", "wf")
 		var ownershipLost *persistence.ShardOwnershipLostError
 		require.ErrorAs(t, err, &ownershipLost)
 	})
@@ -528,7 +528,7 @@ func TestCreateWorkflowExecution_AppendsNewEvents(t *testing.T) {
 	shardCol := newFakeCollection(t)
 	shardCol.enqueueUpdateResult(&mongo.UpdateResult{MatchedCount: 1})
 	shardDB := newFakeMongoDatabase(t)
-	shardDB.collections[collectionShards] = shardCol
+	shardDB.collections[collectionHistoryRecords] = shardCol
 	store.db = shardDB
 
 	branchInfo := &persistencespb.HistoryBranch{TreeId: "tree", BranchId: "branch"}
@@ -580,7 +580,7 @@ func TestUpdateWorkflowExecution_AppendsNewEvents(t *testing.T) {
 	shardCol := newFakeCollection(t)
 	shardCol.enqueueUpdateResult(&mongo.UpdateResult{MatchedCount: 1})
 	shardDB := newFakeMongoDatabase(t)
-	shardDB.collections[collectionShards] = shardCol
+	shardDB.collections[collectionHistoryRecords] = shardCol
 	store.db = shardDB
 
 	branchInfo := &persistencespb.HistoryBranch{TreeId: "tree", BranchId: "branch"}
@@ -651,7 +651,7 @@ func TestConflictResolveWorkflowExecution_AppendsNewEvents(t *testing.T) {
 	shardCol := newFakeCollection(t)
 	shardCol.enqueueUpdateResult(&mongo.UpdateResult{MatchedCount: 1})
 	shardDB := newFakeMongoDatabase(t)
-	shardDB.collections[collectionShards] = shardCol
+	shardDB.collections[collectionHistoryRecords] = shardCol
 	store.db = shardDB
 
 	branchInfo := &persistencespb.HistoryBranch{TreeId: "tree", BranchId: "branch"}
@@ -759,6 +759,7 @@ func TestAppendHistoryNodes_NewBranch(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, historyBranchDocID("tree", "branch"), filter["_id"])
 	require.Equal(t, int32(1), filter["shard_id"])
+	require.Equal(t, "tree", filter["tree_id"])
 	require.Len(t, branchesCol.updateUpdates, 1)
 	updateSet := branchesCol.updateUpdates[0].(bson.M)["$set"].(bson.M)
 	require.Equal(t, "branch-info", updateSet["info"])

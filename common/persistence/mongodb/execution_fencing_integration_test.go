@@ -140,16 +140,16 @@ func TestExecutionStoreRejectsStaleShardOwner(t *testing.T) {
 	require.ErrorAs(t, err, &ownershipLost)
 
 	for _, collectionName := range []string{
-		collectionExecutions,
-		collectionCurrentExecutions,
 		collectionHistoryBranches,
 		collectionHistoryNodes,
-		collectionTransferTasks,
 	} {
 		count, err := factory.database.Collection(collectionName).CountDocuments(ctx, bson.M{})
 		require.NoError(t, err)
 		require.Zero(t, count, "stale owner wrote to %s", collectionName)
 	}
+	count, err := factory.database.Collection(collectionHistoryRecords).CountDocuments(ctx, bson.M{"record_kind": bson.M{"$ne": "fence"}})
+	require.NoError(t, err)
+	require.Zero(t, count, "stale owner wrote a consolidated state/current/task record")
 }
 
 func TestAddHistoryTasksRejectsStaleShardOwner(t *testing.T) {
@@ -184,8 +184,10 @@ func TestAddHistoryTasksRejectsStaleShardOwner(t *testing.T) {
 	}))
 
 	request := &persistence.InternalAddHistoryTasksRequest{
-		ShardID: shardID,
-		RangeID: oldRangeID,
+		ShardID:     shardID,
+		RangeID:     oldRangeID,
+		NamespaceID: "namespace",
+		WorkflowID:  "workflow",
 		Tasks: map[taskspkg.Category][]persistence.InternalHistoryTask{
 			taskspkg.CategoryTransfer: {
 				{
@@ -199,13 +201,13 @@ func TestAddHistoryTasksRejectsStaleShardOwner(t *testing.T) {
 	var ownershipLost *persistence.ShardOwnershipLostError
 	require.ErrorAs(t, err, &ownershipLost)
 
-	count, err := factory.database.Collection(collectionTransferTasks).CountDocuments(ctx, bson.M{})
+	count, err := factory.database.Collection(collectionHistoryRecords).CountDocuments(ctx, bson.M{"record_kind": "task"})
 	require.NoError(t, err)
 	require.Zero(t, count)
 
 	request.RangeID = newRangeID
 	require.NoError(t, executionStore.AddHistoryTasks(ctx, request))
-	count, err = factory.database.Collection(collectionTransferTasks).CountDocuments(ctx, bson.M{})
+	count, err = factory.database.Collection(collectionHistoryRecords).CountDocuments(ctx, bson.M{"record_kind": "task"})
 	require.NoError(t, err)
 	require.Equal(t, int64(1), count)
 }
@@ -250,7 +252,7 @@ type shardFenceBlockingDatabase struct {
 
 func (d *shardFenceBlockingDatabase) Collection(name string) client.Collection {
 	collection := d.Database.Collection(name)
-	if name != collectionShards {
+	if name != collectionHistoryRecords {
 		return collection
 	}
 	return &shardFenceBlockingCollection{
@@ -282,6 +284,16 @@ func (c *shardFenceBlockingCollection) UpdateOne(
 	update interface{},
 	opts ...*options.UpdateOptions,
 ) (*mongo.UpdateResult, error) {
+	var snapshot bson.M
+	identityFilter := bson.M{}
+	for key, value := range filter.(bson.M) {
+		if key != "range_id" {
+			identityFilter[key] = value
+		}
+	}
+	if err := c.Collection.FindOne(ctx, identityFilter).Decode(&snapshot); err != nil {
+		return nil, err
+	}
 	if err := c.pause.wait(ctx); err != nil {
 		return nil, err
 	}

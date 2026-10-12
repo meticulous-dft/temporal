@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	collectionTaskQueues           = "task_queues"
-	collectionTasks                = "tasks"
+	collectionTaskQueues           = "matching_records"
+	collectionTasks                = collectionTaskQueues
 	collectionTaskQueueUserData    = "task_queue_user_data"
 	collectionTaskQueueBuildIDMaps = "task_queue_build_id_map"
 )
@@ -37,6 +37,7 @@ type (
 	}
 
 	taskQueueDocument struct {
+		RecordKind  string    `bson:"record_kind"`
 		ID          string    `bson:"_id"`
 		NamespaceID string    `bson:"namespace_id"`
 		TaskQueue   string    `bson:"task_queue"`
@@ -49,6 +50,7 @@ type (
 	}
 
 	taskDocument struct {
+		RecordKind  string     `bson:"record_kind"`
 		ID          string     `bson:"_id"`
 		NamespaceID string     `bson:"namespace_id"`
 		TaskQueue   string     `bson:"task_queue"`
@@ -88,6 +90,9 @@ func newMongoTaskStore(
 	transactionsEnabled bool,
 	fairnessEnabled bool,
 ) (persistence.TaskStore, error) {
+	if !transactionsEnabled || mongoClient == nil {
+		return nil, errors.New("mongodb task store requires transactions and a session-capable client")
+	}
 	store := &taskStore{
 		db:                  db,
 		mongoClient:         mongoClient,
@@ -149,6 +154,7 @@ func matchingRoutingFilter(namespaceID, taskQueue string, taskType enumspb.TaskQ
 func taskQueueFilter(namespaceID, taskQueue string, taskType enumspb.TaskQueueType, subqueue int, fairnessEnabled bool) bson.M {
 	filter := matchingRoutingFilter(namespaceID, taskQueue, taskType, subqueue)
 	filter["_id"] = taskQueueDocID(namespaceID, taskQueue, taskType, subqueue, fairnessEnabled)
+	filter["record_kind"] = "queue"
 	return filter
 }
 
@@ -158,7 +164,7 @@ func (s *taskStore) ensureIndexes(ctx context.Context) error {
 	// The lookup index is not unique because different versions of the same queue can exist.
 	queueIndexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "namespace_id", Value: 1}, {Key: "task_queue", Value: 1}, {Key: "task_type", Value: 1}, {Key: "subqueue", Value: 1}},
+			Keys:    bson.D{{Key: "namespace_id", Value: 1}, {Key: "task_queue", Value: 1}, {Key: "task_type", Value: 1}, {Key: "record_kind", Value: 1}, {Key: "subqueue", Value: 1}},
 			Options: options.Index().SetName("task_queue_lookup"),
 		},
 	}
@@ -171,12 +177,12 @@ func (s *taskStore) ensureIndexes(ctx context.Context) error {
 
 	taskIndexes := []mongo.IndexModel{
 		{
-			Keys:    bson.D{{Key: "namespace_id", Value: 1}, {Key: "task_queue", Value: 1}, {Key: "task_type", Value: 1}, {Key: "subqueue", Value: 1}, {Key: "task_pass", Value: 1}, {Key: "task_id", Value: 1}},
+			Keys:    bson.D{{Key: "namespace_id", Value: 1}, {Key: "task_queue", Value: 1}, {Key: "task_type", Value: 1}, {Key: "record_kind", Value: 1}, {Key: "subqueue", Value: 1}, {Key: "task_pass", Value: 1}, {Key: "task_id", Value: 1}},
 			Options: options.Index().SetName("tasks_lookup"),
 		},
 		{
 			Keys:    bson.D{{Key: "expiry_time", Value: 1}},
-			Options: options.Index().SetExpireAfterSeconds(0).SetName("tasks_ttl"),
+			Options: options.Index().SetExpireAfterSeconds(0).SetName("tasks_ttl").SetPartialFilterExpression(bson.M{"record_kind": "task"}),
 		},
 	}
 	taskIdxView := s.db.Collection(collectionTasks).Indexes()
@@ -234,6 +240,7 @@ func (s *taskStore) CreateTaskQueue(
 	}
 
 	doc := taskQueueDocument{
+		RecordKind:  "queue",
 		ID:          taskQueueDocID(request.NamespaceID, request.TaskQueue, request.TaskType, persistence.SubqueueZero, s.fairnessEnabled),
 		NamespaceID: request.NamespaceID,
 		TaskQueue:   request.TaskQueue,
@@ -433,7 +440,7 @@ func (s *taskStore) ListTaskQueue(
 		limit = 100
 	}
 
-	filter := bson.M{}
+	filter := bson.M{"record_kind": "queue"}
 	if len(request.PageToken) > 0 {
 		filter["_id"] = bson.M{"$gt": string(request.PageToken)}
 	}
@@ -534,6 +541,7 @@ func (s *taskStore) CreateTasks(
 			expiry = &e
 		}
 		doc := taskDocument{
+			RecordKind:  "task",
 			ID:          docID,
 			NamespaceID: request.NamespaceID,
 			TaskQueue:   request.TaskQueue,
@@ -607,6 +615,7 @@ func (s *taskStore) GetTasks(
 	}
 
 	filter := matchingRoutingFilter(request.NamespaceID, request.TaskQueue, request.TaskType, request.Subqueue)
+	filter["record_kind"] = "task"
 
 	limit := int64(request.PageSize)
 	if limit <= 0 {
@@ -644,6 +653,7 @@ func (s *taskStore) CompleteTasksLessThan(
 	}
 
 	filter := matchingRoutingFilter(request.NamespaceID, request.TaskQueueName, request.TaskType, request.Subqueue)
+	filter["record_kind"] = "task"
 
 	if s.fairnessEnabled {
 		if request.ExclusiveMaxPass == 0 {
@@ -704,6 +714,7 @@ func (s *taskStore) CompleteTasksLessThan(
 	}
 
 	deleteFilter := matchingRoutingFilter(request.NamespaceID, request.TaskQueueName, request.TaskType, request.Subqueue)
+	deleteFilter["record_kind"] = "task"
 	deleteFilter["_id"] = bson.M{"$in": taskIDs}
 	res, err := s.db.Collection(collectionTasks).DeleteMany(ctx, deleteFilter)
 	if err != nil {
@@ -1000,11 +1011,11 @@ func taskQueueDocID(namespaceID, taskQueue string, taskType enumspb.TaskQueueTyp
 	if fairnessEnabled {
 		version = "v2"
 	}
-	return fmt.Sprintf("%s|%s|%d|%d|%s", namespaceID, taskQueue, taskType, subqueue, version)
+	return fmt.Sprintf("queue|%s|%s|%d|%d|%s", namespaceID, taskQueue, taskType, subqueue, version)
 }
 
 func taskDocumentID(namespaceID, taskQueue string, taskType enumspb.TaskQueueType, subqueue int, taskPass int64, taskID int64) string {
-	return fmt.Sprintf("%s|%s|%d|%d|%d|%d", namespaceID, taskQueue, taskType, subqueue, taskPass, taskID)
+	return fmt.Sprintf("task|%s|%s|%d|%d|%d|%d", namespaceID, taskQueue, taskType, subqueue, taskPass, taskID)
 }
 
 func taskQueueUserDataID(namespaceID, taskQueue string) string {

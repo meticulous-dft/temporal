@@ -21,6 +21,7 @@ type (
 
 	shardingDatabase interface {
 		Topology(context.Context) (string, error)
+		ValidateStorageModel(context.Context) error
 		CollectionSharding(context.Context, string) (collectionSharding, error)
 		CountCollection(context.Context, string) (int64, error)
 		ShardCollection(context.Context, mongodbschema.ShardedCollection) error
@@ -39,6 +40,9 @@ func NewShardingInstaller(database shardingDatabase) *ShardingInstaller {
 func (i *ShardingInstaller) Run(ctx context.Context) error {
 	topology, err := i.database.Topology(ctx)
 	if err != nil {
+		return err
+	}
+	if err := i.database.ValidateStorageModel(ctx); err != nil {
 		return err
 	}
 	if topology == mongodbschema.TopologyReplicaSet {
@@ -152,10 +156,34 @@ func (c *Connection) ShardCollection(ctx context.Context, plan mongodbschema.Sha
 	}).Err()
 }
 
+func (c *Connection) ValidateStorageModel(ctx context.Context) error {
+	version, err := c.ReadSchemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if version.StorageModelVersion != mongodbschema.StorageModelVersion || version.StorageBucketCount != mongodbschema.StorageBucketCount {
+		for _, name := range []string{"shards", "history_records", "matching_records", "executions", "current_executions", "transfer_tasks", "timer_tasks", "replication_tasks", "visibility_tasks", "replication_dlq_tasks", "task_queues", "tasks"} {
+			count, err := c.database.Collection(name).CountDocuments(ctx, bson.D{}, options.Count().SetLimit(1))
+			if err != nil {
+				return err
+			}
+			if count != 0 {
+				return fmt.Errorf("cannot install bucket storage model on populated collection %q; initialize a fresh database", name)
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Connection) CommitTopology(ctx context.Context, topology, planVersion string) error {
+	if err := c.ValidateStorageModel(ctx); err != nil {
+		return err
+	}
 	set := bson.M{
-		"topology":   topology,
-		"updated_at": time.Now().UTC(),
+		"topology":              topology,
+		"updated_at":            time.Now().UTC(),
+		"storage_model_version": mongodbschema.StorageModelVersion,
+		"storage_bucket_count":  mongodbschema.StorageBucketCount,
 	}
 	update := bson.M{"$set": set}
 	if planVersion == "" {

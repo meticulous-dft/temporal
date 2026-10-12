@@ -6,7 +6,9 @@ const (
 	TopologyReplicaSet = "replica_set"
 	TopologySharded    = "sharded"
 
-	ShardingPlanVersion = "2"
+	ShardingPlanVersion = "5"
+	StorageModelVersion = "bucketed_atomic_v1"
+	StorageBucketCount  = 64
 )
 
 type ShardedCollection struct {
@@ -17,17 +19,11 @@ type ShardedCollection struct {
 func ShardedCollections() []ShardedCollection {
 	return []ShardedCollection{
 		{Name: "shards", ShardKey: bson.D{{Key: "_id", Value: 1}}},
-		{Name: "executions", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "current_executions", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "history_branches", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "history_nodes", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "transfer_tasks", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "timer_tasks", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "replication_tasks", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "visibility_tasks", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
+		{Name: "history_records", ShardKey: bson.D{{Key: "shard_id", Value: 1}, {Key: "storage_bucket", Value: 1}}},
+		{Name: "history_branches", ShardKey: bson.D{{Key: "tree_id", Value: 1}}},
+		{Name: "history_nodes", ShardKey: bson.D{{Key: "tree_id", Value: 1}}},
 		{Name: "replication_dlq_tasks", ShardKey: bson.D{{Key: "shard_id", Value: 1}}},
-		{Name: "task_queues", ShardKey: matchingShardKey()},
-		{Name: "tasks", ShardKey: matchingShardKey()},
+		{Name: "matching_records", ShardKey: matchingShardKey()},
 		{Name: "visibility", ShardKey: bson.D{
 			{Key: "NamespaceId", Value: 1},
 			{Key: "RunId", Value: "hashed"},
@@ -40,6 +36,5 @@ func matchingShardKey() bson.D {
 		{Key: "namespace_id", Value: 1},
 		{Key: "task_queue", Value: 1},
 		{Key: "task_type", Value: 1},
-		{Key: "subqueue", Value: 1},
 	}
 }

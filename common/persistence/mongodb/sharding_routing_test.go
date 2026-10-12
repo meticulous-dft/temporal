@@ -74,6 +74,20 @@ func TestHistoryPointDeletesUseShardKey(t *testing.T) {
 	} {
 		require.Equal(t, shardID, rawFilter.(bson.M)["shard_id"])
 	}
+	for _, rawFilter := range []interface{}{historyNodes.deleteFilters[0], historyBranches.deleteFilters[0]} {
+		require.Equal(t, "tree", rawFilter.(bson.M)["tree_id"])
+	}
+}
+
+func TestForkHistoryBranchUsesTreeShardKey(t *testing.T) {
+	branches := newFakeCollection(t)
+	store := &executionStore{historyBranchesCol: branches}
+	require.NoError(t, store.ForkHistoryBranch(t.Context(), &persistence.InternalForkHistoryBranchRequest{
+		ShardID: 17, ForkBranchInfo: &persistencespb.HistoryBranch{TreeId: "tree", BranchId: "base"},
+		NewBranchID: "fork", TreeInfo: persistence.NewDataBlob([]byte("tree"), enumspb.ENCODING_TYPE_PROTO3.String()),
+	}))
+	require.Len(t, branches.updateFilters, 1)
+	require.Equal(t, bson.M{"_id": historyBranchDocID("tree", "fork"), "tree_id": "tree", "shard_id": int32(17)}, branches.updateFilters[0])
 }
 
 func TestMatchingQueueOperationsUseCompleteShardKey(t *testing.T) {
@@ -121,9 +135,7 @@ func TestCreateTasksRoutesFenceAndDocumentsByMatchingShardKey(t *testing.T) {
 	db := newFakeMongoDatabase(t)
 	queueCollection := newFakeCollection(t)
 	queueCollection.enqueueUpdateResult(&mongo.UpdateResult{MatchedCount: 1})
-	tasksCollection := newFakeCollection(t)
 	db.collections[collectionTaskQueues] = queueCollection
-	db.collections[collectionTasks] = tasksCollection
 	store := &taskStore{db: db, mongoClient: &fakeMongoClient{}}
 
 	_, err := store.CreateTasks(context.Background(), &persistence.InternalCreateTasksRequest{
@@ -146,9 +158,11 @@ func TestCreateTasksRoutesFenceAndDocumentsByMatchingShardKey(t *testing.T) {
 		require.Equal(t, value, queueFilter[key], "queue fence must include %s", key)
 	}
 
-	require.Len(t, tasksCollection.insertManyDocs, 1)
-	require.Len(t, tasksCollection.insertManyDocs[0], 1)
-	doc := tasksCollection.insertManyDocs[0][0].(taskDocument)
+	require.Len(t, queueCollection.insertManyDocs, 1)
+	require.Len(t, queueCollection.insertManyDocs[0], 1)
+	doc := queueCollection.insertManyDocs[0][0].(taskDocument)
+	require.Equal(t, "task", doc.RecordKind)
+	require.Equal(t, "queue", queueFilter["record_kind"])
 	require.Equal(t, namespace, doc.NamespaceID)
 	require.Equal(t, queue, doc.TaskQueue)
 	require.Equal(t, int32(enumspb.TASK_QUEUE_TYPE_WORKFLOW), doc.TaskType)

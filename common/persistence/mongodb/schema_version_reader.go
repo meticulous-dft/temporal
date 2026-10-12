@@ -18,6 +18,8 @@ type schemaVersionDocument struct {
 	MinCompatibleVersion string `bson:"min_compatible_version"`
 	Topology             string `bson:"topology,omitempty"`
 	ShardingPlanVersion  string `bson:"sharding_plan_version,omitempty"`
+	StorageModelVersion  string `bson:"storage_model_version"`
+	StorageBucketCount   int32  `bson:"storage_bucket_count"`
 }
 
 type SchemaVersionReader struct {
